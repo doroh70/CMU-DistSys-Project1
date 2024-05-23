@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/cmu440/lspnet"
-	"time"
 )
 
 type client struct {
@@ -116,8 +115,8 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		responseSequencedServerMessageChan: make(chan *Message),
 		requestNewSequenceNumChan:          make(chan bool),
 		responseNewSequenceNumChan:         make(chan int),
-		stopReadingChan:                    make(chan bool),
-		stopWritingChan:                    make(chan bool),
+		stopReadingChan:                    make(chan bool, 1),
+		stopWritingChan:                    make(chan bool, 1),
 		serverMessageChan:                  make(chan *Message),
 		writeChan:                          make(chan *Message),
 	}
@@ -133,8 +132,8 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 
 func (c *client) runWithActiveRoutine(fn func()) {
 	c.incrementNumActiveRoutinesChan <- true
-	defer func() { c.decrementNumActiveRoutinesChan <- true }()
 	fn()
+	c.decrementNumActiveRoutinesChan <- true
 }
 
 func (c *client) checkClosed() bool {
@@ -145,29 +144,6 @@ func (c *client) checkClosed() bool {
 		return true
 	}
 	return false
-}
-
-func (c *client) closeProc() {
-	// Mark the client as having been closed to prevent new operations
-	c.beenClosed = true
-
-	// Wait for all pending outgoing messages to be acknowledged
-	ticker := time.NewTicker(100 * time.Millisecond) // Check every 100ms
-	defer ticker.Stop()
-
-	for range ticker.C {
-		if len(c.unAckedClientMessagesMap) == 0 {
-			break // Break the loop when no unacknowledged messages are left
-		}
-	}
-
-	// Stop reading and writing routines by signaling stop channels
-	c.stopReadingChan <- true
-	c.stopWritingChan <- true
-
-	// Wait for the routines to confirm they have stopped
-	<-c.canSafelyCloseChan
-
 }
 
 func (c *client) clientWorkerRoutine() {
@@ -182,7 +158,16 @@ func (c *client) clientWorkerRoutine() {
 		case <-c.requestBeenClosedChan:
 			c.responseBeenClosedChan <- c.beenClosed
 		case <-c.closeServerChan:
-			c.closeProc()
+			//Mark the client as having been closed to prevent new operations
+			c.beenClosed = true
+
+			//Implement check to ensure unAckedClientMessagesMap is empty then do below..
+
+			//Stop reading and writing routines by signaling stop channels
+			c.stopReadingChan <- true
+			c.stopWritingChan <- true
+
+			c.canSafelyCloseChan <- true
 			return
 		case <-c.requestConnIDChan:
 			c.responseConnIDChan <- c.connID
