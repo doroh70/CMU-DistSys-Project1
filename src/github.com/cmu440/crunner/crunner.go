@@ -8,7 +8,6 @@ import (
 	"io/ioutil"
 	"log"
 	"strconv"
-	"time"
 
 	"github.com/cmu440/lsp"
 	"github.com/cmu440/lspnet"
@@ -60,19 +59,19 @@ func main() {
 
 func runClient(cli lsp.Client) {
 	defer fmt.Println("Exiting...")
-	counter := 1 // Start with 1
 	for {
-		// Prepare number to send to server.
-		s := strconv.Itoa(counter)    // Convert integer counter to string
-		fmt.Printf("Client: %s\n", s) // Display what is being sent to the server
-
+		// Get next token from input.
+		fmt.Printf("Client: ")
+		var s string
+		if _, err := fmt.Scan(&s); err != nil {
+			return
+		}
 		// Send message to server.
 		if err := cli.Write([]byte(s)); err != nil {
 			fmt.Printf("Client %d failed to write to server: %s\n", cli.ConnID(), err)
 			return
 		}
 		log.Printf("Client %d wrote '%s' to server\n", cli.ConnID(), s)
-
 		// Read message from server.
 		payload, err := cli.Read()
 		if err != nil {
@@ -80,10 +79,5 @@ func runClient(cli lsp.Client) {
 			return
 		}
 		fmt.Printf("Server: %s\n", string(payload))
-
-		counter++ // Increment the counter for the next iteration
-
-		// Sleep for 4 seconds before next iteration
-		time.Sleep(4 * time.Second)
 	}
 }
