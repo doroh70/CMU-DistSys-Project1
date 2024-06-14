@@ -13,7 +13,9 @@ import (
 type client struct {
 	beenClosed                 bool
 	conn                       *lspnet.UDPConn
+	connAckReceived            bool
 	connectionId               int
+	currentEpochsElapsed       int
 	isConnLost                 bool
 	sequenceNumber             int
 	params                     *Params
@@ -49,7 +51,6 @@ type client struct {
 // hostport is a colon-separated string identifying the server's host address
 // and port number (i.e., "localhost:9999").
 func NewClient(hostport string, initialSeqNum int, params *Params) (Client, error) {
-	// Open up UDP connection
 	addr, err := lspnet.ResolveUDPAddr("udp", hostport)
 	if err != nil {
 		return nil, err
@@ -63,7 +64,9 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	client := &client{
 		beenClosed:                 false,
 		conn:                       conn,
+		connAckReceived:            false,
 		connectionId:               0,
+		currentEpochsElapsed:       0,
 		isConnLost:                 false,
 		sequenceNumber:             initialSeqNum,
 		params:                     params,
@@ -169,8 +172,6 @@ func (c *client) clientWorkerRoutine() {
 		fmt.Println("Failed to establish connection:", err)
 		c.connEstablishedChan <- false // this will go on to close the server ~ look up NewClient method
 	}
-	connAckReceived := false
-	currentEpochsElapsed := 0
 
 	epochTimer := time.NewTimer(time.Duration(c.params.EpochMillis) * time.Millisecond)
 	for {
@@ -180,10 +181,19 @@ func (c *client) clientWorkerRoutine() {
 			return
 		case <-c.closeReadRoutineChan:
 			// insert close readRoutine procedure
-		case <-c.writeChan:
-			// insert write procedure
-		case <-c.inboundMessageChan:
-			// insert inbound message procedure
+		case msg := <-c.inboundMessageChan:
+			// check message type
+			switch msg.Type {
+			case MsgAck:
+				// { if conn ack, signal a connection has been established}
+				// { if ack doesn't fall under sliding window, discard} else { acknowledge corresponding message and make adjustWindow call and sendWindow call}
+			case MsgCAck:
+				// { if ack doesn't fall under sliding window, discard} else { acknowledge corresponding message and make adjustWindow call and sendWindow call}
+			case MsgData:
+				// if data message, send ack and add to readBuffer (buffer is ordered by serverSeqNum) { if serverSeqNum  isn't >= client chosen ISN +1, ignore msg} {if duplicate seqNum, ack and don't add to buffer}
+			default:
+				// Do nothing. client should ignore connect messages
+			}
 		case <-c.requestBeenClosedChan:
 			c.responseBeenClosedChan <- c.beenClosed
 		case <-c.requestConnLostChan:
@@ -193,32 +203,49 @@ func (c *client) clientWorkerRoutine() {
 		case <-c.requestNewSequenceNumChan:
 			c.sequenceNumber++
 			c.responseNewSequenceNumChan <- c.sequenceNumber
-		case <-c.responseOrderedMessageChan:
+		case <-c.requestOrderedMessageChan:
 			// insert ordered message read
 		case <-c.writeChan:
-			// insert write procedure
+			// If the seqNum received is contiguous with the tail of writeBuff, push it to tail(and push others in intermediate buffer that are contiguous with that too)
+			// make adjustWindow call
+			// make sendWindow call
+			// Else, keep in intermediate buffer ~ this can be PQ?
 		case <-epochTimer.C:
-			// insert epoch procedure
+			c.handleEpochEvent()
+		}
+	}
+}
 
-			// If we haven't received a connection acknowledgment, attempt to resend
-			if !connAckReceived {
-				if currentEpochsElapsed < c.params.EpochLimit {
-					// Retry sending the connection request up to 3 times
-					err := c.retrySendConnect(3)
-					if err != nil {
-						fmt.Println("Retry failed with error:", err)
-					}
-					// Increment the epochs elapsed counter
-					currentEpochsElapsed++
-				} else {
-					// If the epoch limit is reached, signal that the connection could not be established
-					fmt.Println("Epoch limit reached. Could not establish connection.")
-					c.connEstablishedChan <- false
-				}
+// handleEpochEvent check pdf documentation
+func (c *client) handleEpochEvent() {
+	// Increment the epochs elapsed counter
+	c.currentEpochsElapsed++
+
+	// check we are not at epochLimit
+	if c.currentEpochsElapsed < c.params.EpochLimit {
+		// If we haven't received a connection acknowledgment, attempt to resend
+		if !c.connAckReceived {
+			// Retry sending the connection request up to 3 times
+			err := c.retrySendConnect(3)
+			if err != nil {
+				fmt.Println("Send failed with error:", err)
 			}
-
-			//Else regular epoch procedure
-
+		} else {
+			if len(slidingWindow) == 0 {
+				// If there are no messages to send, send a heartbeat instead
+			} else {
+				// Else resend packets in sliding window (with maxUnacked constraint) that have not yet been acknowledged, according to exponential back off rules. (make sendWindow call)
+			}
+		}
+	} else {
+		// If the epoch limit is reached, signal that the connection is lost
+		fmt.Println("Epoch limit reached.")
+		c.isConnLost = true
+		// close connection
+		err := c.conn.Close()
+		if err != nil {
+			fmt.Println("Failed to close LSP connection:", err)
+			return
 		}
 	}
 }
@@ -245,7 +272,7 @@ func (c *client) readAndProcessPacket() {
 	}
 
 	validBuffer := buffer[:bytesRead]
-	msg, err := unmarshalAndVerifyMessage(validBuffer)
+	msg, err := c.unmarshalAndVerifyMessage(validBuffer)
 	if err != nil {
 		fmt.Println("Error processing message:", err)
 		return
@@ -254,11 +281,16 @@ func (c *client) readAndProcessPacket() {
 	c.inboundMessageChan <- msg
 }
 
-// unmarshalAndVerifyMessage unmarshals the buffer into a Message and verifies its integrity
-func unmarshalAndVerifyMessage(buffer []byte) (*Message, error) {
+// unmarshalAndVerifyMessage unmarshals the buffer into a Message and verifies its integrity using checksum calculation and payload size
+func (c *client) unmarshalAndVerifyMessage(buffer []byte) (*Message, error) {
 	msg := &Message{}
 	if err := json.Unmarshal(buffer, msg); err != nil {
 		return nil, fmt.Errorf("unmarshal error: %w", err)
+	}
+
+	// Verify connection ID of message
+	if c.connAckReceived && msg.ConnID != c.connectionId {
+		return nil, fmt.Errorf("connection ID mismatch")
 	}
 
 	// Verify payload size
@@ -276,21 +308,31 @@ func unmarshalAndVerifyMessage(buffer []byte) (*Message, error) {
 	return msg, nil
 }
 
-// retrySendConnect attempts to send the connection message up to maxRetries times.
-func (c *client) retrySendConnect(maxRetries int) error {
-	connMsg := NewConnect(c.sequenceNumber)
-	marshalledConn, _ := json.Marshal(connMsg)
+// sendMessage attempts to send a message over the network up to maxRetries times.
+func (c *client) sendMessage(msg *Message, maxRetries int) error {
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
 
-	var err error
+	marshalledMsg, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("error marshalling message: %v", err)
+	}
+
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		_, err = c.conn.Write(marshalledConn)
+		_, err = c.conn.Write(marshalledMsg)
 		if err == nil {
 			// If write is successful, exit the loop
 			return nil
 		}
-		fmt.Printf("Attempt %d: Error sending connection message: %v\n", attempt, err)
-		time.Sleep(1 * time.Second) // Wait before the next retry
+		fmt.Printf("Attempt %d: Error sending message: %v\n", attempt, err)
 	}
 	// Return the error after maxRetries attempts
-	return fmt.Errorf("after %d attempts, failed to send connection message: %v", maxRetries, err)
+	return fmt.Errorf("after %d attempts, failed to send message: %v", maxRetries, err)
+}
+
+// retrySendConnect constructs the connection message and uses sendMessage to send it.
+func (c *client) retrySendConnect(maxRetries int) error {
+	connMsg := NewConnect(c.sequenceNumber)
+	return c.sendMessage(connMsg, maxRetries)
 }
