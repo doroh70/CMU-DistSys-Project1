@@ -3,6 +3,7 @@
 package lsp
 
 import (
+	"container/heap"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,30 +12,37 @@ import (
 )
 
 type client struct {
-	beenClosed                 bool
-	conn                       *lspnet.UDPConn
-	connAckReceived            bool
-	connectionId               int
-	currentEpochsElapsed       int
-	isConnLost                 bool
-	sequenceNumber             int
-	params                     *Params
-	allRoutinesTerminatedChan  chan bool
-	closeClientChan            chan bool
-	closeReadRoutineChan       chan bool
-	connEstablishedChan        chan bool // connEstablishedChan signals to startup routine via NewClient method, whether a connection with the server was established or not. A false signal would trigger the Close client method.
-	inboundMessageChan         chan *Message
-	requestBeenClosedChan      chan bool
-	responseBeenClosedChan     chan bool
-	requestConnLostChan        chan bool
-	responseConnLostChan       chan bool
-	requestMessageExistsChan   chan bool
-	responseMessageExistsChan  chan bool
-	requestNewSequenceNumChan  chan bool
-	responseNewSequenceNumChan chan int
-	requestOrderedMessageChan  chan bool
-	responseOrderedMessageChan chan *Message
-	writeChan                  chan *Message
+	beenClosed                       bool
+	conn                             *lspnet.UDPConn
+	connAckReceived                  bool
+	connectionId                     int
+	currentEpochsElapsed             int
+	dataSentLastEpoch                bool
+	isConnLost                       bool
+	initialSequenceNumber            int // This value should only be instantiated in NewClient method
+	params                           *Params
+	sequenceNumber                   int
+	readQueue                        *MessageQueue
+	readSet                          HashSet
+	lastReadSeqNum                   int
+	slidingWindow                    *SlidingWindow
+	allSpawnedRoutinesTerminatedChan chan bool
+	closeClientChan                  chan bool
+	closeReadRoutineChan             chan bool
+	readRoutineClosedChan            chan bool
+	connEstablishedChan              chan bool // connEstablishedChan signals to startup routine via NewClient method, whether a connection with the server was established or not. A false signal would trigger the Close client method.
+	inboundMessageChan               chan *Message
+	requestBeenClosedChan            chan bool
+	responseBeenClosedChan           chan bool
+	requestConnLostChan              chan bool
+	responseConnLostChan             chan bool
+	requestMessageExistsChan         chan bool
+	responseMessageExistsChan        chan bool
+	requestNewSequenceNumChan        chan bool
+	responseNewSequenceNumChan       chan int
+	requestOrderedMessageChan        chan bool
+	responseOrderedMessageChan       chan *Message
+	writeChan                        chan *Message
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -60,32 +68,43 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	if err != nil {
 		return nil, err
 	}
+
+	readQueue := &MessageQueue{}
+	heap.Init(readQueue)
+
 	// Instantiate client
 	client := &client{
-		beenClosed:                 false,
-		conn:                       conn,
-		connAckReceived:            false,
-		connectionId:               0,
-		currentEpochsElapsed:       0,
-		isConnLost:                 false,
-		sequenceNumber:             initialSeqNum,
-		params:                     params,
-		allRoutinesTerminatedChan:  make(chan bool),
-		closeClientChan:            make(chan bool),
-		closeReadRoutineChan:       make(chan bool),
-		connEstablishedChan:        make(chan bool),
-		inboundMessageChan:         make(chan *Message),
-		requestBeenClosedChan:      make(chan bool),
-		responseBeenClosedChan:     make(chan bool),
-		requestConnLostChan:        make(chan bool),
-		responseConnLostChan:       make(chan bool),
-		requestMessageExistsChan:   make(chan bool),
-		responseMessageExistsChan:  make(chan bool),
-		requestNewSequenceNumChan:  make(chan bool),
-		responseNewSequenceNumChan: make(chan int),
-		requestOrderedMessageChan:  make(chan bool),
-		responseOrderedMessageChan: make(chan *Message),
-		writeChan:                  make(chan *Message),
+		beenClosed:                       false,
+		conn:                             conn,
+		connAckReceived:                  false,
+		connectionId:                     0,
+		currentEpochsElapsed:             0,
+		dataSentLastEpoch:                false,
+		isConnLost:                       false,
+		initialSequenceNumber:            initialSeqNum,
+		params:                           params,
+		sequenceNumber:                   initialSeqNum,
+		readQueue:                        readQueue,
+		readSet:                          NewHashSet(),
+		lastReadSeqNum:                   initialSeqNum,
+		slidingWindow:                    NewSlidingWindow(params),
+		allSpawnedRoutinesTerminatedChan: make(chan bool),
+		closeClientChan:                  make(chan bool),
+		closeReadRoutineChan:             make(chan bool, 1),
+		readRoutineClosedChan:            make(chan bool, 1),
+		connEstablishedChan:              make(chan bool),
+		inboundMessageChan:               make(chan *Message),
+		requestBeenClosedChan:            make(chan bool),
+		responseBeenClosedChan:           make(chan bool),
+		requestConnLostChan:              make(chan bool),
+		responseConnLostChan:             make(chan bool),
+		requestMessageExistsChan:         make(chan bool),
+		responseMessageExistsChan:        make(chan bool),
+		requestNewSequenceNumChan:        make(chan bool),
+		responseNewSequenceNumChan:       make(chan int),
+		requestOrderedMessageChan:        make(chan bool),
+		responseOrderedMessageChan:       make(chan *Message),
+		writeChan:                        make(chan *Message),
 	}
 	// Launch read, and worker routines
 	go client.clientWorkerRoutine()
@@ -125,8 +144,15 @@ func (c *client) Read() ([]byte, error) {
 			return nil, errors.New("connection has been lost")
 		}
 	}
-	c.requestOrderedMessageChan <- true
-	msg := <-c.responseOrderedMessageChan
+	var msg *Message
+	for {
+		c.requestOrderedMessageChan <- true
+		msg = <-c.responseOrderedMessageChan
+		if msg != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	return msg.Payload, nil
 	// (3) the server is closed ~ this is ambiguous af, so will ignore for now. Only thing I can think of right now that would check for this is a ICMP message
 }
@@ -158,58 +184,118 @@ func (c *client) Write(payload []byte) error {
 // Close will hang if server has already been explicitly closed
 func (c *client) Close() error {
 	c.closeClientChan <- true
-	<-c.allRoutinesTerminatedChan
+	<-c.allSpawnedRoutinesTerminatedChan
 	return nil
 }
 
 func (c *client) clientWorkerRoutine() {
 	// This should only return when all spawned routines are terminated
-	defer func() { c.allRoutinesTerminatedChan <- true }()
+	defer func() { c.allSpawnedRoutinesTerminatedChan <- true }()
 
 	// Attempt to send the connection message to the server with retry
-	err := c.retrySendConnect(3) // 3 attempts
+	connMsg := NewConnect(c.initialSequenceNumber)
+	err := c.sendMessage(connMsg, 3)
 	if err != nil {
 		fmt.Println("Failed to establish connection:", err)
 		c.connEstablishedChan <- false // this will go on to close the server ~ look up NewClient method
 	}
 
 	epochTimer := time.NewTimer(time.Duration(c.params.EpochMillis) * time.Millisecond)
+
+	firstShutdown := true // ensures we perform shut down procedure once
 	for {
 		select {
 		case <-c.closeClientChan:
-			// insert close Procedure
-			return
-		case <-c.closeReadRoutineChan:
-			// insert close readRoutine procedure
+			c.beenClosed = true
 		case msg := <-c.inboundMessageChan:
+			c.currentEpochsElapsed = 0 // reset epochLimit counter
+			connEstablishedFunc := func() {
+				if msg.SeqNum == c.initialSequenceNumber && !c.connAckReceived {
+					c.connAckReceived = true
+					c.connectionId = msg.ConnID
+					c.connEstablishedChan <- true
+				}
+			}
+			acknowledgeFunc := func(cumulative bool) {
+				if c.slidingWindow.ValidAck(msg.SeqNum) {
+					c.slidingWindow.AcknowledgeMessage(msg.SeqNum, cumulative)
+					c.slidingWindow.AdjustWindow()
+					c.slidingWindow.SendWindow()
+				}
+			}
+
 			// check message type
 			switch msg.Type {
 			case MsgAck:
-				// { if conn ack, signal a connection has been established}
-				// { if ack doesn't fall under sliding window, discard} else { acknowledge corresponding message and make adjustWindow call and sendWindow call}
+				// if conn ack, signal a connection has been established
+				connEstablishedFunc()
+				// { if ack doesn't fall under sliding window, discard} else { acknowledge corresponding message and make AdjustWindow call and SendWindow call}
+				acknowledgeFunc(false)
+
+				if c.beenClosed && c.slidingWindow.Size() == 0 && firstShutdown {
+					_ = c.conn.Close()
+					c.closeReadRoutineChan <- true
+					firstShutdown = false
+				}
 			case MsgCAck:
-				// { if ack doesn't fall under sliding window, discard} else { acknowledge corresponding message and make adjustWindow call and sendWindow call}
+				// if conn ack, signal a connection has been established
+				connEstablishedFunc()
+				// { if ack doesn't fall under sliding window, discard} else { acknowledge corresponding message and make AdjustWindow call and SendWindow call}
+				acknowledgeFunc(true)
+
+				if c.beenClosed && c.slidingWindow.Size() == 0 && firstShutdown {
+					_ = c.conn.Close()
+					c.closeReadRoutineChan <- true
+					firstShutdown = false
+				}
 			case MsgData:
-				// if data message, send ack and add to readBuffer (buffer is ordered by serverSeqNum) { if serverSeqNum  isn't >= client chosen ISN +1, ignore msg} {if duplicate seqNum, ack and don't add to buffer}
+				// if data message, send ack and add to readBuffer (buffer is ordered by serverSeqNum)  { if serverSeqNum  isn't > client chosen ISN, ignore msg} {if duplicate seqNum, ack and don't add to buffer}
+				if msg.SeqNum > c.initialSequenceNumber {
+					if !c.readSet.Contains(msg.SeqNum) {
+						c.readSet.Add(msg.SeqNum)
+						heap.Push(c.readQueue, msg)
+					}
+					// send ack
+					ack := NewAck(msg.ConnID, msg.SeqNum)
+					err := c.sendMessage(ack, 3)
+					if err != nil {
+						fmt.Println("Ack failed with error:", err)
+					}
+
+				}
 			default:
 				// Do nothing. client should ignore connect messages
 			}
+		case <-c.readRoutineClosedChan:
+			return
 		case <-c.requestBeenClosedChan:
 			c.responseBeenClosedChan <- c.beenClosed
 		case <-c.requestConnLostChan:
 			c.responseConnLostChan <- c.isConnLost
 		case <-c.requestMessageExistsChan:
-			// insert message exists query procedure
+			if c.readQueue.Len() > 0 {
+				c.responseMessageExistsChan <- true
+			} else {
+				c.responseMessageExistsChan <- false
+			}
 		case <-c.requestNewSequenceNumChan:
 			c.sequenceNumber++
 			c.responseNewSequenceNumChan <- c.sequenceNumber
 		case <-c.requestOrderedMessageChan:
-			// insert ordered message read
-		case <-c.writeChan:
-			// If the seqNum received is contiguous with the tail of writeBuff, push it to tail(and push others in intermediate buffer that are contiguous with that too)
-			// make adjustWindow call
-			// make sendWindow call
-			// Else, keep in intermediate buffer ~ this can be PQ?
+			msg := c.readQueue.Peek()
+			if (msg != nil) && (msg.(*Message).SeqNum == c.lastReadSeqNum+1) {
+				_ = c.readQueue.Pop()
+				c.responseOrderedMessageChan <- msg.(*Message)
+			} else {
+				c.responseOrderedMessageChan <- nil
+			}
+		case msg := <-c.writeChan:
+			// push in intermediate buffer ~ this will be PQ
+			heap.Push(c.slidingWindow.writeQueue, msg)
+			// make AdjustWindow call
+			c.slidingWindow.AdjustWindow()
+			// make SendWindow call
+			c.slidingWindow.SendWindow()
 		case <-epochTimer.C:
 			c.handleEpochEvent()
 		}
@@ -226,16 +312,23 @@ func (c *client) handleEpochEvent() {
 		// If we haven't received a connection acknowledgment, attempt to resend
 		if !c.connAckReceived {
 			// Retry sending the connection request up to 3 times
-			err := c.retrySendConnect(3)
+			connMsg := NewConnect(c.initialSequenceNumber)
+			err := c.sendMessage(connMsg, 3)
 			if err != nil {
-				fmt.Println("Send failed with error:", err)
+				fmt.Println("Connect failed with error:", err)
 			}
 		} else {
-			if len(slidingWindow) == 0 {
-				// If there are no messages to send, send a heartbeat instead
-			} else {
-				// Else resend packets in sliding window (with maxUnacked constraint) that have not yet been acknowledged, according to exponential back off rules. (make sendWindow call)
+			// resend packets in sliding window (with maxUnacked constraint) that have not yet been acknowledged, according to exponential back off rules. (make SendWindow call)
+			c.slidingWindow.SendWindow()
+			// If we did not send data message in last epoch, send heartbeat
+			if !c.dataSentLastEpoch {
+				heartBeat := NewAck(c.connectionId, 0)
+				err := c.sendMessage(heartBeat, 3)
+				if err != nil {
+					fmt.Println("Heartbeat failed with error:", err)
+				}
 			}
+
 		}
 	} else {
 		// If the epoch limit is reached, signal that the connection is lost
@@ -248,6 +341,7 @@ func (c *client) handleEpochEvent() {
 			return
 		}
 	}
+	c.dataSentLastEpoch = false
 }
 
 // readRoutine continuously reads LSP packets from the UDP connection, and passes them to the worker routine for handling
@@ -255,6 +349,7 @@ func (c *client) readRoutine() {
 	for {
 		select {
 		case <-c.closeReadRoutineChan:
+			c.readRoutineClosedChan <- true
 			return
 		default:
 			c.readAndProcessPacket()
@@ -316,23 +411,18 @@ func (c *client) sendMessage(msg *Message, maxRetries int) error {
 
 	marshalledMsg, err := json.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("error marshalling message: %v", err)
+		return fmt.Errorf("error marshalling message: %s, error: %v", msg.String(), err)
 	}
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		_, err = c.conn.Write(marshalledMsg)
 		if err == nil {
 			// If write is successful, exit the loop
+			c.dataSentLastEpoch = true
 			return nil
 		}
-		fmt.Printf("Attempt %d: Error sending message: %v\n", attempt, err)
+		fmt.Printf("Attempt %d: Error sending message: %s, error: %v\n", attempt, msg.String(), err)
 	}
 	// Return the error after maxRetries attempts
-	return fmt.Errorf("after %d attempts, failed to send message: %v", maxRetries, err)
-}
-
-// retrySendConnect constructs the connection message and uses sendMessage to send it.
-func (c *client) retrySendConnect(maxRetries int) error {
-	connMsg := NewConnect(c.sequenceNumber)
-	return c.sendMessage(connMsg, maxRetries)
+	return fmt.Errorf("after %d attempts, failed to send message: %s, error: %v", maxRetries, msg.String(), err)
 }
