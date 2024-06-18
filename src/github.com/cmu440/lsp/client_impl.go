@@ -154,7 +154,7 @@ func (c *client) Read() ([]byte, error) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return msg.Payload, nil
-	// (3) the server is closed ~ this is ambiguous af, so will ignore for now. Only thing I can think of right now that would check for this is a ICMP message
+	// (3) the server is closed ~ this is ambiguous af, so will ignore for now. Only thing I can think of right now that would check for this is a ICMP message. can do this
 }
 
 // Write will hang if server has already been explicitly closed
@@ -404,7 +404,7 @@ func (c *client) unmarshalAndVerifyMessage(buffer []byte) (*Message, error) {
 	msg.Payload = msg.Payload[:msg.Size]
 
 	// Verify checksum
-	if msg.Checksum != CalculateChecksum(msg.ConnID, msg.SeqNum, msg.Size, msg.Payload) {
+	if msg.Type == MsgData && msg.Checksum != CalculateChecksum(msg.ConnID, msg.SeqNum, msg.Size, msg.Payload) {
 		return nil, fmt.Errorf("checksum mismatch")
 	}
 

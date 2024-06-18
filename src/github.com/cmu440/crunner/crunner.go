@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"strconv"
+	"time"
 
 	"github.com/cmu440/lsp"
 	"github.com/cmu440/lspnet"
@@ -59,19 +60,20 @@ func main() {
 
 func runClient(cli lsp.Client) {
 	defer fmt.Println("Exiting...")
+
+	number := 1 // Start from 1
+
 	for {
-		// Get next token from input.
-		fmt.Printf("Client: ")
-		var s string
-		if _, err := fmt.Scan(&s); err != nil {
-			return
-		}
+		// Convert the number to a byte slice
+		data := []byte(strconv.Itoa(number))
+
 		// Send message to server.
-		if err := cli.Write([]byte(s)); err != nil {
+		if err := cli.Write(data); err != nil {
 			fmt.Printf("Client %d failed to write to server: %s\n", cli.ConnID(), err)
 			return
 		}
-		log.Printf("Client %d wrote '%s' to server\n", cli.ConnID(), s)
+		log.Printf("Client %d wrote '%d' to server\n", cli.ConnID(), number)
+
 		// Read message from server.
 		payload, err := cli.Read()
 		if err != nil {
@@ -79,5 +81,11 @@ func runClient(cli lsp.Client) {
 			return
 		}
 		fmt.Printf("Server: %s\n", string(payload))
+
+		// Increment the number
+		number++
+
+		// Optional: Add a short delay to avoid flooding the server too quickly
+		time.Sleep(1 * time.Second) // Adjust the duration as needed
 	}
 }

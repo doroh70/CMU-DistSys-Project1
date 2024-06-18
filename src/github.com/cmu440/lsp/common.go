@@ -62,6 +62,7 @@ type SlidingWindow struct {
 	maxBackOffInterval int
 	currUnacked        int
 	maxUnacked         int
+	lastSeqNum         int // last sequence number to pass through window
 }
 
 func NewSlidingWindow(params *Params) *SlidingWindow {
@@ -107,16 +108,21 @@ func (s *SlidingWindow) AcknowledgeMessage(seqNumber int, cumulative bool) {
 		s.window[updateIndexFromFirst].acked = true
 		s.currUnacked--
 	}
-	for seq := seqNumber; cumulative && s.ValidAck(seq); seq-- {
+
+	seq := seqNumber
+	singleAckFunc(seq)
+	seq--
+
+	for ; cumulative && s.ValidAck(seq); seq-- {
 		singleAckFunc(seq)
 	}
 }
 
 func (s *SlidingWindow) AdjustWindow() {
 	// Remove acknowledged messages from the front of the window
-	for s.window[s.fIndex].acked {
+	for s.Size > 0 && s.window[s.fIndex] != nil && s.window[s.fIndex].acked {
 		s.fIndex = (s.fIndex + 1) % s.windowSize
-		s.Size-- // Decrement the size
+		s.Size--
 	}
 
 	// Handle new messages from the writeQueue
@@ -131,7 +137,16 @@ func (s *SlidingWindow) AdjustWindow() {
 			break
 		}
 
-		currentEndSeq := s.window[(s.lIndex-1+s.windowSize)%s.windowSize].message.SeqNum
+		// Calculate the sequence number of the last message in the window or lastSeqNum if window is empty
+		lastIndex := (s.lIndex - 1 + s.windowSize) % s.windowSize
+		var currentEndSeq int // latest message seqNum in window
+		if s.window[lastIndex] != nil {
+			currentEndSeq = s.window[lastIndex].message.SeqNum
+		} else {
+			currentEndSeq = s.lastSeqNum // This ensures the new message is treated as the first message
+		}
+
+		// Check if the next message is contiguous
 		if nextMessage.(*Message).SeqNum == currentEndSeq+1 {
 			// Add the next message to the window
 			s.window[s.lIndex] = &WindowedMessage{
@@ -146,6 +161,8 @@ func (s *SlidingWindow) AdjustWindow() {
 			s.writeQueue.Pop()
 			// Increment the size
 			s.Size++
+			// Update lastSeqNum
+			s.lastSeqNum++
 		} else {
 			// If the next message is not contiguous, break the loop
 			break
