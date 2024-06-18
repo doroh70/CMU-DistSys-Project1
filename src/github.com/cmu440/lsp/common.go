@@ -1,5 +1,12 @@
 package lsp
 
+import (
+	"container/heap"
+	"encoding/json"
+	"fmt"
+	"github.com/cmu440/lspnet"
+)
+
 // MessageQueue implements heap.Interface and holds Messages. Messages are ordered by sequence number, lowest appearing first on the queue.
 type MessageQueue []*Message
 
@@ -21,7 +28,7 @@ func (pq *MessageQueue) Push(x interface{}) {
 
 func (pq *MessageQueue) Pop() interface{} {
 	if pq.Len() == 0 {
-		return nil // or panic, or return an error
+		return nil
 	}
 	n := len(*pq)
 	item := (*pq)[n-1]
@@ -32,38 +39,213 @@ func (pq *MessageQueue) Pop() interface{} {
 // Peek returns the highest priority element without removing it from the heap.
 func (pq *MessageQueue) Peek() interface{} {
 	if pq.Len() == 0 {
-		return nil // or handle error as needed
+		return nil
 	}
 	// The highest priority element is at the root of the heap.
 	return (*pq)[0]
 }
 
+type WindowedMessage struct {
+	message          *Message
+	acked            bool
+	currentBackOff   int
+	currBackOffTimer int
+}
+
 type SlidingWindow struct {
-	writeQueue *MessageQueue
-}
-
-func (s *SlidingWindow) ValidAck(seqNumber int) bool {
-	// Implementation here
-	return false
-}
-
-func (s *SlidingWindow) AcknowledgeMessage(seqNumber int, cumulative bool) {
-	// Implementation here
+	writeQueue         *MessageQueue
+	fIndex             int
+	lIndex             int
+	window             []*WindowedMessage
+	Size               int
+	windowSize         int
+	maxBackOffInterval int
+	currUnacked        int
+	maxUnacked         int
 }
 
 func NewSlidingWindow(params *Params) *SlidingWindow {
 	// Implementation here
-	return nil
+	writeQueue := &MessageQueue{}
+	heap.Init(writeQueue)
+	sw := &SlidingWindow{
+		writeQueue:         writeQueue,
+		fIndex:             0,
+		lIndex:             0,
+		window:             make([]*WindowedMessage, params.WindowSize),
+		Size:               0,
+		windowSize:         params.WindowSize,
+		maxBackOffInterval: params.MaxBackOffInterval,
+		currUnacked:        0,
+		maxUnacked:         params.MaxUnackedMessages,
+	}
+	return sw
+}
+
+func (s *SlidingWindow) ValidAck(seqNumber int) bool {
+	// Ensure the message at fIndex is initialized
+	if s.window[s.fIndex] == nil {
+		return false
+	}
+
+	// Define the start sequence number at fIndex
+	startSeq := s.window[s.fIndex].message.SeqNum
+
+	// Compute the end sequence number at the position just before lIndex
+	endIndex := (s.lIndex - 1 + s.windowSize) % s.windowSize // wrap around safe
+	endSeq := s.window[endIndex].message.SeqNum
+
+	// Check if seqNumber falls within the logical range of [startSeq, endSeq]
+	return seqNumber >= startSeq && seqNumber <= endSeq
+}
+
+// AcknowledgeMessage assumes that the message with seqNumber exists in the SlidingWindow. It will cause a runtime panic if seqNumber passed is not valid.
+func (s *SlidingWindow) AcknowledgeMessage(seqNumber int, cumulative bool) {
+	// sets s.window[s.fIndex].message.SeqNum - seqNumber position to acked
+	singleAckFunc := func(seqNumber int) {
+		updateIndexFromFirst := (s.fIndex + (seqNumber - s.window[s.fIndex].message.SeqNum)) % s.windowSize
+		s.window[updateIndexFromFirst].acked = true
+		s.currUnacked--
+	}
+	for seq := seqNumber; cumulative && s.ValidAck(seq); seq-- {
+		singleAckFunc(seq)
+	}
 }
 
 func (s *SlidingWindow) AdjustWindow() {
+	// Remove acknowledged messages from the front of the window
+	for s.window[s.fIndex].acked {
+		s.fIndex = (s.fIndex + 1) % s.windowSize
+		s.Size-- // Decrement the size
+	}
+
+	// Handle new messages from the writeQueue
+	for {
+		// Check if we have space in the window
+		if s.Size == s.windowSize {
+			break // Window is full, cannot add more messages
+		}
+
+		nextMessage := s.writeQueue.Peek()
+		if nextMessage == nil {
+			break
+		}
+
+		currentEndSeq := s.window[(s.lIndex-1+s.windowSize)%s.windowSize].message.SeqNum
+		if nextMessage.(*Message).SeqNum == currentEndSeq+1 {
+			// Add the next message to the window
+			s.window[s.lIndex] = &WindowedMessage{
+				message:          nextMessage.(*Message),
+				acked:            false,
+				currentBackOff:   -1,
+				currBackOffTimer: 0,
+			}
+			// Move lIndex to the next available slot
+			s.lIndex = (s.lIndex + 1) % s.windowSize
+			// Remove the message from the writeQueue
+			s.writeQueue.Pop()
+			// Increment the size
+			s.Size++
+		} else {
+			// If the next message is not contiguous, break the loop
+			break
+		}
+	}
 }
 
-func (s *SlidingWindow) SendWindow() {
+// SendNewlyAdmittedToWindow sends messages in the window with currentBackOff = -1 and updates their currentBackOff to 0 after sending them.
+func (s *SlidingWindow) SendNewlyAdmittedToWindow(conn *lspnet.UDPConn) bool {
+	// Flag to check if any data was sent successfully
+	dataSent := false
+
+	// Iterate through the window
+	for i := 0; i < s.Size; i++ {
+		// Check if we can send more unacknowledged messages
+		if s.currUnacked < s.maxUnacked {
+			// Calculate the current index in the circular buffer
+			index := (s.fIndex + i) % s.windowSize
+
+			// Check if the message at the current index has currentBackOff = -1
+			if s.window[index] != nil && s.window[index].currentBackOff == -1 {
+				// Send the message using SendMessage
+				err := SendMessage(conn, s.window[index].message, 3)
+				if err != nil {
+					fmt.Printf("Error sending message in window: %s, error: %v\n", s.window[index].message.String(), err)
+					continue
+				}
+
+				// Mark that we have successfully sent at least one message
+				dataSent = true
+
+				// Update currentBackOff to 0
+				s.window[index].currentBackOff = 0
+
+				// Increment the count of unacknowledged messages
+				s.currUnacked++
+			}
+		} else {
+			break
+		}
+	}
+	return dataSent
 }
 
-func (s *SlidingWindow) Size() int {
-	return 0
+// SendWindowWithBackOff sends messages in the window that are due for transmission
+// based on their back-off timer, and adjusts their back-off intervals accordingly.
+func (s *SlidingWindow) SendWindowWithBackOff(conn *lspnet.UDPConn) bool {
+	// Flag to check if any data was sent successfully
+	dataSent := false
+
+	// Iterate through the window
+	for i := 0; i < s.Size; i++ {
+		// Check if we can send more unacknowledged messages
+		if s.currUnacked < s.maxUnacked {
+			// Calculate the current index in the circular buffer
+			index := (s.fIndex + i) % s.windowSize
+
+			// Access the current message
+			msg := s.window[index]
+
+			// If currBackOffTimer reaches 0, send the message
+			if msg.currBackOffTimer == 0 {
+				// Send the message
+				err := SendMessage(conn, msg.message, 3)
+				if err != nil {
+					fmt.Printf("Error sending message in window: %s, error: %v\n", s.window[index].message.String(), err)
+					continue
+				}
+
+				// Mark that we have successfully sent at least one message
+				dataSent = true
+
+				// Update currentBackOff exponentially
+				if msg.currentBackOff < s.maxBackOffInterval {
+					msg.currentBackOff *= 2
+					if msg.currentBackOff > s.maxBackOffInterval {
+						msg.currentBackOff = s.maxBackOffInterval
+					}
+				}
+
+				// After sending, reset currBackOffTimer to new currentBackOff
+				msg.currBackOffTimer = msg.currentBackOff
+
+				// Increment the count of unacknowledged messages
+				s.currUnacked++
+			} else {
+				// Decrement the currBackOffTimer
+				msg.currBackOffTimer--
+			}
+		} else {
+			// If we've reached the maxUnacked limit, stop sending
+			break
+		}
+	}
+
+	return dataSent
+}
+
+func (s *SlidingWindow) Push(msg *Message) {
+	heap.Push(s.writeQueue, msg)
 }
 
 // HashSet type using a map for boolean values to track unique sequence numbers
@@ -87,4 +269,30 @@ func (set HashSet) Remove(seqNum int) {
 // Contains checks if a sequence number is in the set
 func (set HashSet) Contains(seqNum int) bool {
 	return set[seqNum]
+}
+
+// SendMessage sends a message over a UDP connection with retry logic.
+// The `conn` parameter must be a UDP connection created using `lspnet.DialUDP`
+func SendMessage(conn *lspnet.UDPConn, msg *Message, maxRetries int) error {
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+
+	// Marshal the message to JSON format
+	marshalledMsg, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("error marshalling message: %s, error: %v", msg.String(), err)
+	}
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Write the marshalled message to the UDP connection
+		_, err = conn.Write(marshalledMsg)
+		if err == nil {
+			// If write is successful, exit the loop
+			return nil
+		}
+		fmt.Printf("Attempt %d: Error sending message: %s, error: %v\n", attempt, msg.String(), err)
+	}
+	// Return the error after maxRetries attempts
+	return fmt.Errorf("after %d attempts, failed to send message: %s, error: %v", maxRetries, msg.String(), err)
 }

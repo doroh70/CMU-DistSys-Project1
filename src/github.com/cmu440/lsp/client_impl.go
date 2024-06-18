@@ -194,10 +194,12 @@ func (c *client) clientWorkerRoutine() {
 
 	// Attempt to send the connection message to the server with retry
 	connMsg := NewConnect(c.initialSequenceNumber)
-	err := c.sendMessage(connMsg, 3)
+	err := SendMessage(c.conn, connMsg, 3)
 	if err != nil {
 		fmt.Println("Failed to establish connection:", err)
 		c.connEstablishedChan <- false // this will go on to close the server ~ look up NewClient method
+	} else {
+		c.dataSentLastEpoch = true
 	}
 
 	epochTimer := time.NewTimer(time.Duration(c.params.EpochMillis) * time.Millisecond)
@@ -220,7 +222,14 @@ func (c *client) clientWorkerRoutine() {
 				if c.slidingWindow.ValidAck(msg.SeqNum) {
 					c.slidingWindow.AcknowledgeMessage(msg.SeqNum, cumulative)
 					c.slidingWindow.AdjustWindow()
-					c.slidingWindow.SendWindow()
+					c.dataSentLastEpoch = c.slidingWindow.SendNewlyAdmittedToWindow(c.conn)
+				}
+			}
+			thisMightPerformShutdownProcedure := func() {
+				if c.beenClosed && c.slidingWindow.Size+c.slidingWindow.writeQueue.Len() == 0 && firstShutdown {
+					_ = c.conn.Close()
+					c.closeReadRoutineChan <- true
+					firstShutdown = false
 				}
 			}
 
@@ -229,25 +238,17 @@ func (c *client) clientWorkerRoutine() {
 			case MsgAck:
 				// if conn ack, signal a connection has been established
 				connEstablishedFunc()
-				// { if ack doesn't fall under sliding window, discard} else { acknowledge corresponding message and make AdjustWindow call and SendWindow call}
+				// { if ack doesn't fall under sliding window, discard} else { acknowledge corresponding message and make AdjustWindow call and SendNewlyAdmittedToWindow call}
 				acknowledgeFunc(false)
 
-				if c.beenClosed && c.slidingWindow.Size() == 0 && firstShutdown {
-					_ = c.conn.Close()
-					c.closeReadRoutineChan <- true
-					firstShutdown = false
-				}
+				thisMightPerformShutdownProcedure()
 			case MsgCAck:
 				// if conn ack, signal a connection has been established
 				connEstablishedFunc()
-				// { if ack doesn't fall under sliding window, discard} else { acknowledge corresponding message and make AdjustWindow call and SendWindow call}
+				// { if ack doesn't fall under sliding window, discard} else { acknowledge corresponding message and make AdjustWindow call and SendNewlyAdmittedToWindow call}
 				acknowledgeFunc(true)
 
-				if c.beenClosed && c.slidingWindow.Size() == 0 && firstShutdown {
-					_ = c.conn.Close()
-					c.closeReadRoutineChan <- true
-					firstShutdown = false
-				}
+				thisMightPerformShutdownProcedure()
 			case MsgData:
 				// if data message, send ack and add to readBuffer (buffer is ordered by serverSeqNum)  { if serverSeqNum  isn't > client chosen ISN, ignore msg} {if duplicate seqNum, ack and don't add to buffer}
 				if msg.SeqNum > c.initialSequenceNumber {
@@ -257,9 +258,11 @@ func (c *client) clientWorkerRoutine() {
 					}
 					// send ack
 					ack := NewAck(msg.ConnID, msg.SeqNum)
-					err := c.sendMessage(ack, 3)
+					err := SendMessage(c.conn, ack, 3)
 					if err != nil {
 						fmt.Println("Ack failed with error:", err)
+					} else {
+						c.dataSentLastEpoch = true
 					}
 
 				}
@@ -286,16 +289,17 @@ func (c *client) clientWorkerRoutine() {
 			if (msg != nil) && (msg.(*Message).SeqNum == c.lastReadSeqNum+1) {
 				_ = c.readQueue.Pop()
 				c.responseOrderedMessageChan <- msg.(*Message)
+				c.lastReadSeqNum++
 			} else {
 				c.responseOrderedMessageChan <- nil
 			}
 		case msg := <-c.writeChan:
 			// push in intermediate buffer ~ this will be PQ
-			heap.Push(c.slidingWindow.writeQueue, msg)
+			c.slidingWindow.Push(msg)
 			// make AdjustWindow call
 			c.slidingWindow.AdjustWindow()
-			// make SendWindow call
-			c.slidingWindow.SendWindow()
+			// make SendNewlyAdmittedToWindow call
+			c.dataSentLastEpoch = c.slidingWindow.SendNewlyAdmittedToWindow(c.conn)
 		case <-epochTimer.C:
 			c.handleEpochEvent()
 		}
@@ -313,19 +317,23 @@ func (c *client) handleEpochEvent() {
 		if !c.connAckReceived {
 			// Retry sending the connection request up to 3 times
 			connMsg := NewConnect(c.initialSequenceNumber)
-			err := c.sendMessage(connMsg, 3)
+			err := SendMessage(c.conn, connMsg, 3)
 			if err != nil {
 				fmt.Println("Connect failed with error:", err)
+			} else {
+				c.dataSentLastEpoch = true
 			}
 		} else {
-			// resend packets in sliding window (with maxUnacked constraint) that have not yet been acknowledged, according to exponential back off rules. (make SendWindow call)
-			c.slidingWindow.SendWindow()
+			// resend packets in sliding window (with maxUnacked constraint) that have not yet been acknowledged, according to exponential back off rules. (make SendWindowWithBackOff call)
+			c.dataSentLastEpoch = c.slidingWindow.SendWindowWithBackOff(c.conn)
 			// If we did not send data message in last epoch, send heartbeat
 			if !c.dataSentLastEpoch {
 				heartBeat := NewAck(c.connectionId, 0)
-				err := c.sendMessage(heartBeat, 3)
+				err := SendMessage(c.conn, heartBeat, 3)
 				if err != nil {
 					fmt.Println("Heartbeat failed with error:", err)
+				} else {
+					c.dataSentLastEpoch = true
 				}
 			}
 
@@ -401,28 +409,4 @@ func (c *client) unmarshalAndVerifyMessage(buffer []byte) (*Message, error) {
 	}
 
 	return msg, nil
-}
-
-// sendMessage attempts to send a message over the network up to maxRetries times.
-func (c *client) sendMessage(msg *Message, maxRetries int) error {
-	if maxRetries < 0 {
-		maxRetries = 0
-	}
-
-	marshalledMsg, err := json.Marshal(msg)
-	if err != nil {
-		return fmt.Errorf("error marshalling message: %s, error: %v", msg.String(), err)
-	}
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		_, err = c.conn.Write(marshalledMsg)
-		if err == nil {
-			// If write is successful, exit the loop
-			c.dataSentLastEpoch = true
-			return nil
-		}
-		fmt.Printf("Attempt %d: Error sending message: %s, error: %v\n", attempt, msg.String(), err)
-	}
-	// Return the error after maxRetries attempts
-	return fmt.Errorf("after %d attempts, failed to send message: %s, error: %v", maxRetries, msg.String(), err)
 }
