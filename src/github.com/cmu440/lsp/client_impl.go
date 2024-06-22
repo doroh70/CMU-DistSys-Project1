@@ -126,7 +126,7 @@ func (c *client) ConnID() int {
 	return c.connectionId
 }
 
-// Read will hang if server has already been explicitly closed
+// Read will hang if client has already been explicitly closed
 func (c *client) Read() ([]byte, error) {
 	// If Close has been called on the client, subsequent calls to Read must either return a non-nil error, or never return anything.
 	c.requestBeenClosedChan <- true
@@ -151,13 +151,23 @@ func (c *client) Read() ([]byte, error) {
 		if msg != nil {
 			break
 		}
+		// Return a non-nil error if the connection with the server has been lost and no other messages are waiting to be returned
+		c.requestConnLostChan <- true
+		connLost := <-c.responseConnLostChan
+		if connLost {
+			c.requestMessageExistsChan <- true
+			exists := <-c.responseMessageExistsChan
+			if !exists {
+				return nil, errors.New("connection has been lost")
+			}
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	return msg.Payload, nil
 	// (3) the server is closed ~ this is ambiguous af, so will ignore for now. Only thing I can think of right now that would check for this is a ICMP message. can do this
 }
 
-// Write will hang if server has already been explicitly closed
+// Write will hang if client has already been explicitly closed
 func (c *client) Write(payload []byte) error {
 	// return a non-nil error if the connection with the server has been lost
 	c.requestConnLostChan <- true
@@ -181,7 +191,7 @@ func (c *client) Write(payload []byte) error {
 	return nil
 }
 
-// Close will hang if server has already been explicitly closed
+// Close will hang if client has already been explicitly closed
 func (c *client) Close() error {
 	c.closeClientChan <- true
 	<-c.allSpawnedRoutinesTerminatedChan
@@ -202,7 +212,8 @@ func (c *client) clientWorkerRoutine() {
 		c.dataSentLastEpoch = true
 	}
 
-	epochTimer := time.NewTimer(time.Duration(c.params.EpochMillis) * time.Millisecond)
+	epochTicker := time.NewTicker(time.Duration(c.params.EpochMillis) * time.Millisecond)
+	defer epochTicker.Stop()
 
 	firstShutdown := true // ensures we perform shut down procedure once
 	for {
@@ -300,7 +311,7 @@ func (c *client) clientWorkerRoutine() {
 			c.slidingWindow.AdjustWindow()
 			// make SendNewlyAdmittedToWindow call
 			c.dataSentLastEpoch = c.slidingWindow.SendNewlyAdmittedToWindow(c.conn)
-		case <-epochTimer.C:
+		case <-epochTicker.C:
 			c.handleEpochEvent()
 		}
 	}

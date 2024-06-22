@@ -74,7 +74,7 @@ func runClient(cli lsp.Client) {
 		}
 		log.Printf("Client %d wrote '%d' to server\n", cli.ConnID(), number)
 
-		// Read message from server.
+		// Read message from server
 		payload, err := cli.Read()
 		if err != nil {
 			fmt.Printf("Client %d failed to read from server: %s\n", cli.ConnID(), err)

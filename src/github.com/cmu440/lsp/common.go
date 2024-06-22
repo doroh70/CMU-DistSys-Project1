@@ -62,7 +62,7 @@ type SlidingWindow struct {
 	maxBackOffInterval int
 	currUnacked        int
 	maxUnacked         int
-	lastSeqNum         int // last sequence number to pass through window
+	lastSeqNum         int // last sequence num to pass through window
 }
 
 func NewSlidingWindow(params *Params) *SlidingWindow {
