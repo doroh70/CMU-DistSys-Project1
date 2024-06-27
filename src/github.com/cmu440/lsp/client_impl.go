@@ -12,18 +12,20 @@ import (
 )
 
 type client struct {
+	addr                             *lspnet.UDPAddr
 	beenClosed                       bool
 	conn                             *lspnet.UDPConn
 	connAckReceived                  bool
 	connectionId                     int
 	currentEpochsElapsed             int
 	dataSentLastEpoch                bool
+	epochTicker                      *time.Ticker
 	isConnLost                       bool
 	initialSequenceNumber            int // This value should only be instantiated in NewClient method
 	params                           *Params
 	sequenceNumber                   int
 	readQueue                        *MessageQueue
-	readSet                          HashSet
+	readSet                          HashSetInt
 	lastReadSeqNum                   int
 	slidingWindow                    *SlidingWindow
 	allSpawnedRoutinesTerminatedChan chan bool
@@ -74,6 +76,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 
 	// Instantiate client
 	client := &client{
+		addr:                             addr,
 		beenClosed:                       false,
 		conn:                             conn,
 		connAckReceived:                  false,
@@ -85,10 +88,10 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		params:                           params,
 		sequenceNumber:                   initialSeqNum,
 		readQueue:                        readQueue,
-		readSet:                          NewHashSet(),
+		readSet:                          NewHashSetInt(),
 		lastReadSeqNum:                   initialSeqNum,
 		slidingWindow:                    NewSlidingWindow(params),
-		allSpawnedRoutinesTerminatedChan: make(chan bool),
+		allSpawnedRoutinesTerminatedChan: make(chan bool, 1),
 		closeClientChan:                  make(chan bool),
 		closeReadRoutineChan:             make(chan bool, 1),
 		readRoutineClosedChan:            make(chan bool, 1),
@@ -117,7 +120,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	}
 
 	// Close the client if the connection was not established
-	_ = client.Close()
+	<-client.allSpawnedRoutinesTerminatedChan
 	return nil, errors.New("unable to establish connection")
 }
 
@@ -204,16 +207,15 @@ func (c *client) clientWorkerRoutine() {
 
 	// Attempt to send the connection message to the server with retry
 	connMsg := NewConnect(c.initialSequenceNumber)
-	err := SendMessage(c.conn, connMsg, 3)
+	err := SendMessage(c.conn, connMsg, nil, 3)
 	if err != nil {
 		fmt.Println("Failed to establish connection:", err)
-		c.connEstablishedChan <- false // this will go on to close the server ~ look up NewClient method
 	} else {
 		c.dataSentLastEpoch = true
 	}
 
-	epochTicker := time.NewTicker(time.Duration(c.params.EpochMillis) * time.Millisecond)
-	defer epochTicker.Stop()
+	c.epochTicker = time.NewTicker(time.Duration(c.params.EpochMillis) * time.Millisecond)
+	defer c.epochTicker.Stop()
 
 	firstShutdown := true // ensures we perform shut down procedure once
 	for {
@@ -233,7 +235,7 @@ func (c *client) clientWorkerRoutine() {
 				if c.slidingWindow.ValidAck(msg.SeqNum) {
 					c.slidingWindow.AcknowledgeMessage(msg.SeqNum, cumulative)
 					c.slidingWindow.AdjustWindow()
-					c.dataSentLastEpoch = c.slidingWindow.SendNewlyAdmittedToWindow(c.conn)
+					c.dataSentLastEpoch = c.slidingWindow.SendNewlyAdmittedToWindow(c.conn, nil)
 				}
 			}
 			thisMightPerformShutdownProcedure := func() {
@@ -269,19 +271,19 @@ func (c *client) clientWorkerRoutine() {
 					}
 					// send ack
 					ack := NewAck(msg.ConnID, msg.SeqNum)
-					err := SendMessage(c.conn, ack, 3)
+					err := SendMessage(c.conn, ack, nil, 3)
 					if err != nil {
 						fmt.Println("Ack failed with error:", err)
-					} else {
-						c.dataSentLastEpoch = true
 					}
-
 				}
 			default:
 				// Do nothing. client should ignore connect messages
 			}
 		case <-c.readRoutineClosedChan:
-			return
+			if c.beenClosed {
+				fmt.Println("Closing")
+				return
+			}
 		case <-c.requestBeenClosedChan:
 			c.responseBeenClosedChan <- c.beenClosed
 		case <-c.requestConnLostChan:
@@ -305,13 +307,15 @@ func (c *client) clientWorkerRoutine() {
 				c.responseOrderedMessageChan <- nil
 			}
 		case msg := <-c.writeChan:
-			// push in intermediate buffer ~ this will be PQ
-			c.slidingWindow.Push(msg)
-			// make AdjustWindow call
-			c.slidingWindow.AdjustWindow()
-			// make SendNewlyAdmittedToWindow call
-			c.dataSentLastEpoch = c.slidingWindow.SendNewlyAdmittedToWindow(c.conn)
-		case <-epochTicker.C:
+			if msg != nil {
+				// push in intermediate buffer ~ this will be PQ
+				c.slidingWindow.Push(msg)
+				// make AdjustWindow call
+				c.slidingWindow.AdjustWindow()
+				// make SendNewlyAdmittedToWindow call
+				c.dataSentLastEpoch = c.slidingWindow.SendNewlyAdmittedToWindow(c.conn, nil)
+			}
+		case <-c.epochTicker.C:
 			c.handleEpochEvent()
 		}
 	}
@@ -328,31 +332,34 @@ func (c *client) handleEpochEvent() {
 		if !c.connAckReceived {
 			// Retry sending the connection request up to 3 times
 			connMsg := NewConnect(c.initialSequenceNumber)
-			err := SendMessage(c.conn, connMsg, 3)
+			err := SendMessage(c.conn, connMsg, nil, 3)
 			if err != nil {
 				fmt.Println("Connect failed with error:", err)
-			} else {
-				c.dataSentLastEpoch = true
 			}
 		} else {
 			// resend packets in sliding window (with maxUnacked constraint) that have not yet been acknowledged, according to exponential back off rules. (make SendWindowWithBackOff call)
-			c.dataSentLastEpoch = c.slidingWindow.SendWindowWithBackOff(c.conn)
+			c.dataSentLastEpoch = c.slidingWindow.SendWindowWithBackOff(c.conn, nil)
 			// If we did not send data message in last epoch, send heartbeat
 			if !c.dataSentLastEpoch {
 				heartBeat := NewAck(c.connectionId, 0)
-				err := SendMessage(c.conn, heartBeat, 3)
+				err := SendMessage(c.conn, heartBeat, nil, 3)
 				if err != nil {
 					fmt.Println("Heartbeat failed with error:", err)
 				} else {
-					c.dataSentLastEpoch = true
+					fmt.Println("Sent HeartBeat")
 				}
 			}
-
 		}
 	} else {
-		// If the epoch limit is reached, signal that the connection is lost
+		// If the epoch limit is reached, signal that the connection is lost and stop epoch ticker
 		fmt.Println("Epoch limit reached.")
+		c.epochTicker.Stop()
 		c.isConnLost = true
+		if !c.connAckReceived {
+			c.connEstablishedChan <- false
+		}
+		//signal readRoutine to close
+		c.closeReadRoutineChan <- true
 		// close connection
 		err := c.conn.Close()
 		if err != nil {
@@ -412,7 +419,7 @@ func (c *client) unmarshalAndVerifyMessage(buffer []byte) (*Message, error) {
 		return nil, fmt.Errorf("payload size mismatch")
 	}
 
-	msg.Payload = msg.Payload[:msg.Size]
+	msg.Payload = msg.Payload[:msg.Size] // "If the size of the data is longer than the given size, there is no “correct” behavior, but one such solution, which LSP should employ, is to simply truncate the data to the correct length."
 
 	// Verify checksum
 	if msg.Type == MsgData && msg.Checksum != CalculateChecksum(msg.ConnID, msg.SeqNum, msg.Size, msg.Payload) {

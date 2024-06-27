@@ -50,6 +50,7 @@ type WindowedMessage struct {
 	acked            bool
 	currentBackOff   int
 	currBackOffTimer int
+	sent             bool
 }
 
 type SlidingWindow struct {
@@ -154,6 +155,7 @@ func (s *SlidingWindow) AdjustWindow() {
 				acked:            false,
 				currentBackOff:   -1,
 				currBackOffTimer: 0,
+				sent:             false,
 			}
 			// Move lIndex to the next available slot
 			s.lIndex = (s.lIndex + 1) % s.windowSize
@@ -171,7 +173,8 @@ func (s *SlidingWindow) AdjustWindow() {
 }
 
 // SendNewlyAdmittedToWindow sends messages in the window with currentBackOff = -1 and updates their currentBackOff to 0 after sending them.
-func (s *SlidingWindow) SendNewlyAdmittedToWindow(conn *lspnet.UDPConn) bool {
+// If the destination address is nil, it is assumed that the connection was created with DialUDP.
+func (s *SlidingWindow) SendNewlyAdmittedToWindow(conn *lspnet.UDPConn, addr *lspnet.UDPAddr) bool {
 	// Flag to check if any data was sent successfully
 	dataSent := false
 
@@ -182,10 +185,10 @@ func (s *SlidingWindow) SendNewlyAdmittedToWindow(conn *lspnet.UDPConn) bool {
 			// Calculate the current index in the circular buffer
 			index := (s.fIndex + i) % s.windowSize
 
-			// Check if the message at the current index has currentBackOff = -1
-			if s.window[index] != nil && s.window[index].currentBackOff == -1 {
+			// Check if the message at the current index has currentBackOff = -1 and has not been sent before
+			if s.window[index] != nil && s.window[index].currentBackOff == -1 && !s.window[index].sent {
 				// Send the message using SendMessage
-				err := SendMessage(conn, s.window[index].message, 3)
+				err := SendMessage(conn, s.window[index].message, addr, 3)
 				if err != nil {
 					fmt.Printf("Error sending message in window: %s, error: %v\n", s.window[index].message.String(), err)
 					continue
@@ -194,8 +197,9 @@ func (s *SlidingWindow) SendNewlyAdmittedToWindow(conn *lspnet.UDPConn) bool {
 				// Mark that we have successfully sent at least one message
 				dataSent = true
 
-				// Update currentBackOff to 0
+				// Update currentBackOff to 0 and mark message as sent
 				s.window[index].currentBackOff = 0
+				s.window[index].sent = true
 
 				// Increment the count of unacknowledged messages
 				s.currUnacked++
@@ -209,24 +213,25 @@ func (s *SlidingWindow) SendNewlyAdmittedToWindow(conn *lspnet.UDPConn) bool {
 
 // SendWindowWithBackOff sends messages in the window that are due for transmission
 // based on their back-off timer, and adjusts their back-off intervals accordingly.
-func (s *SlidingWindow) SendWindowWithBackOff(conn *lspnet.UDPConn) bool {
+// If the destination address is nil, it is assumed that the connection was created with DialUDP.
+func (s *SlidingWindow) SendWindowWithBackOff(conn *lspnet.UDPConn, addr *lspnet.UDPAddr) bool {
 	// Flag to check if any data was sent successfully
 	dataSent := false
 
 	// Iterate through the window
 	for i := 0; i < s.Size; i++ {
-		// Check if we can send more unacknowledged messages
-		if s.currUnacked < s.maxUnacked {
-			// Calculate the current index in the circular buffer
-			index := (s.fIndex + i) % s.windowSize
+		// Calculate the current index in the circular buffer
+		index := (s.fIndex + i) % s.windowSize
 
-			// Access the current message
-			msg := s.window[index]
+		// Access the current message
+		msg := s.window[index]
 
-			// If currBackOffTimer reaches 0, send the message
-			if msg.currBackOffTimer == 0 {
+		// If currBackOffTimer reaches 0, send the message
+		if msg.currBackOffTimer == 0 {
+			// Check if we can send more unacknowledged messages or if this is a resend
+			if s.currUnacked < s.maxUnacked || msg.sent {
 				// Send the message
-				err := SendMessage(conn, msg.message, 3)
+				err := SendMessage(conn, msg.message, addr, 3)
 				if err != nil {
 					fmt.Printf("Error sending message in window: %s, error: %v\n", s.window[index].message.String(), err)
 					continue
@@ -246,15 +251,15 @@ func (s *SlidingWindow) SendWindowWithBackOff(conn *lspnet.UDPConn) bool {
 				// After sending, reset currBackOffTimer to new currentBackOff
 				msg.currBackOffTimer = msg.currentBackOff
 
-				// Increment the count of unacknowledged messages
-				s.currUnacked++
-			} else {
-				// Decrement the currBackOffTimer
-				msg.currBackOffTimer--
+				// Increment the count of unacknowledged messages if this is the first time the message is sent
+				if !msg.sent {
+					s.currUnacked++
+					msg.sent = true
+				}
 			}
 		} else {
-			// If we've reached the maxUnacked limit, stop sending
-			break
+			// Decrement the currBackOffTimer
+			msg.currBackOffTimer--
 		}
 	}
 
@@ -265,32 +270,55 @@ func (s *SlidingWindow) Push(msg *Message) {
 	heap.Push(s.writeQueue, msg)
 }
 
-// HashSet type using a map for boolean values to track unique sequence numbers
-type HashSet map[int]bool
+// HashSetInt type using a map for boolean values to track unique integers
+type HashSetInt map[int]bool
 
-// NewHashSet creates a new instance of HashSet
-func NewHashSet() HashSet {
-	return make(HashSet)
+// NewHashSetInt creates a new instance of HashSetInt
+func NewHashSetInt() HashSetInt {
+	return make(HashSetInt)
 }
 
-// Add adds a new sequence number to the set
-func (set HashSet) Add(seqNum int) {
-	set[seqNum] = true
+// Add adds a new number to the set
+func (set HashSetInt) Add(num int) {
+	set[num] = true
 }
 
-// Remove removes a sequence number from the set
-func (set HashSet) Remove(seqNum int) {
-	delete(set, seqNum)
+// Remove removes a number from the set
+func (set HashSetInt) Remove(num int) {
+	delete(set, num)
 }
 
-// Contains checks if a sequence number is in the set
-func (set HashSet) Contains(seqNum int) bool {
-	return set[seqNum]
+// Contains checks if a number is in the set
+func (set HashSetInt) Contains(num int) bool {
+	return set[num]
+}
+
+// HashSetStr type using a map for boolean values to track unique strings
+type HashSetStr map[string]bool
+
+// NewHashSetStr creates a new instance of HashSetStr
+func NewHashSetStr() HashSetStr {
+	return make(HashSetStr)
+}
+
+// Add adds a new string to the set
+func (set HashSetStr) Add(str string) {
+	set[str] = true
+}
+
+// Remove removes a string from the set
+func (set HashSetStr) Remove(str string) {
+	delete(set, str)
+}
+
+// Contains checks if a string is in the set
+func (set HashSetStr) Contains(str string) bool {
+	return set[str]
 }
 
 // SendMessage sends a message over a UDP connection with retry logic.
-// The `conn` parameter must be a UDP connection created using `lspnet.DialUDP`
-func SendMessage(conn *lspnet.UDPConn, msg *Message, maxRetries int) error {
+// If the destination address is nil, it is assumed that the connection was created with DialUDP.
+func SendMessage(conn *lspnet.UDPConn, msg *Message, addr *lspnet.UDPAddr, maxRetries int) error {
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
@@ -303,7 +331,13 @@ func SendMessage(conn *lspnet.UDPConn, msg *Message, maxRetries int) error {
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		// Write the marshalled message to the UDP connection
-		_, err = conn.Write(marshalledMsg)
+		_, err = conn.WriteToUDP(marshalledMsg, addr)
+		if addr != nil {
+			_, err = conn.WriteToUDP(marshalledMsg, addr)
+		} else {
+			_, err = conn.Write(marshalledMsg)
+		}
+
 		if err == nil {
 			// If write is successful, exit the loop
 			return nil
