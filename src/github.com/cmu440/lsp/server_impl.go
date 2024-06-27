@@ -27,7 +27,7 @@ type server struct {
 	inboundMessageChan               chan *messageAndAddress
 	readRoutineClosedChan            chan bool
 	requestActiveConnChan            chan int
-	responseActiveConnChan           chan bool
+	responseConnActiveChan           chan bool
 	requestConnClosedChan            chan int
 	responseConnClosedChan           chan bool
 	requestConnLostChan              chan int
@@ -119,7 +119,7 @@ func NewServer(port int, params *Params) (Server, error) {
 		inboundMessageChan:               make(chan *messageAndAddress),
 		readRoutineClosedChan:            make(chan bool, 1),
 		requestActiveConnChan:            make(chan int),
-		responseActiveConnChan:           make(chan bool),
+		responseConnActiveChan:           make(chan bool),
 		requestConnClosedChan:            make(chan int),
 		responseConnClosedChan:           make(chan bool),
 		requestConnLostChan:              make(chan int),
@@ -208,10 +208,19 @@ func (s *server) serverWorkerRoutine() {
 	ticker := time.NewTicker(time.Duration(s.params.EpochMillis) * time.Millisecond)
 
 	checkConnState := func(id int, status Status) {
+		var chanInsert bool
 		if s.clientConnections[id] != nil {
-			s.responseActiveConnChan <- s.clientConnections[id].status == status
+			chanInsert = s.clientConnections[id].status == status
 		} else {
-			s.responseActiveConnChan <- false
+			chanInsert = false
+		}
+		switch status {
+		case active:
+			s.responseConnActiveChan <- chanInsert
+		case closed:
+			s.responseConnClosedChan <- chanInsert
+		case lost:
+			s.responseConnLostChan <- chanInsert
 		}
 	}
 
@@ -253,7 +262,7 @@ func (s *server) serverWorkerRoutine() {
 							closeOpFinished:       false,
 							currentEpochsElapsed:  0,
 							dataSentLastEpoch:     false,
-							initialSequenceNumber: msgAndAddy.msg.SeqNum + 1,
+							initialSequenceNumber: msgAndAddy.msg.SeqNum,
 							lastReadSeqNum:        msgAndAddy.msg.SeqNum,
 							sequenceNumber:        msgAndAddy.msg.SeqNum,
 							readSet:               NewHashSetInt(),
@@ -349,7 +358,7 @@ func (s *server) serverWorkerRoutine() {
 			}
 		case msg := <-s.writeChan:
 			if msg != nil {
-				if err := s.verifyMessage(msg); err != nil {
+				if err := s.verifyMessage(msg); err == nil {
 					//add message to slidingWindow of corresponding clientStub
 					id := msg.ConnID
 					if stub := s.clientConnections[id]; stub != nil {
@@ -462,7 +471,7 @@ func (s *server) Read() (int, []byte, error) {
 // Write will hang if server has already been explicitly closed
 func (s *server) Write(connId int, payload []byte) error {
 	s.requestActiveConnChan <- connId
-	connActive := <-s.responseActiveConnChan
+	connActive := <-s.responseConnActiveChan
 	if connActive {
 		// construct data message
 		s.requestNewSequenceNumChan <- connId
@@ -484,7 +493,7 @@ func (s *server) Write(connId int, payload []byte) error {
 // You may assume that after CloseConn has been called, neither Write nor CloseConn will be called on that same connection ID again
 func (s *server) CloseConn(connId int) error {
 	s.requestActiveConnChan <- connId
-	connActive := <-s.responseActiveConnChan
+	connActive := <-s.responseConnActiveChan
 	if connActive {
 		s.closeClientSessionChan <- connId
 		return nil

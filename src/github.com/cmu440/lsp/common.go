@@ -331,7 +331,6 @@ func SendMessage(conn *lspnet.UDPConn, msg *Message, addr *lspnet.UDPAddr, maxRe
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		// Write the marshalled message to the UDP connection
-		_, err = conn.WriteToUDP(marshalledMsg, addr)
 		if addr != nil {
 			_, err = conn.WriteToUDP(marshalledMsg, addr)
 		} else {

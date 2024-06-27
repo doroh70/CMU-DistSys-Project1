@@ -5,13 +5,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/cmu440/lsp"
+	"github.com/cmu440/lspnet"
 	"io/ioutil"
 	"log"
 	"strconv"
-	"time"
-
-	"github.com/cmu440/lsp"
-	"github.com/cmu440/lspnet"
 )
 
 var (
@@ -82,10 +80,7 @@ func runClient(cli lsp.Client) {
 		}
 		fmt.Printf("Server: %s\n", string(payload))
 
-		// Increment the number
+		// Increment the numbe
 		number++
-
-		// Optional: Add a short delay to avoid flooding the server too quickly
-		time.Sleep(1 * time.Second) // Adjust the duration as needed
 	}
 }

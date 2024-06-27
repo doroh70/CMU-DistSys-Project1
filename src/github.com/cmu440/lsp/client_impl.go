@@ -295,14 +295,14 @@ func (c *client) clientWorkerRoutine() {
 				c.responseMessageExistsChan <- false
 			}
 		case <-c.requestNewSequenceNumChan:
-			c.sequenceNumber++
+			c.sequenceNumber += 1
 			c.responseNewSequenceNumChan <- c.sequenceNumber
 		case <-c.requestOrderedMessageChan:
 			msg := c.readQueue.Peek()
 			if (msg != nil) && (msg.(*Message).SeqNum == c.lastReadSeqNum+1) {
 				_ = c.readQueue.Pop()
 				c.responseOrderedMessageChan <- msg.(*Message)
-				c.lastReadSeqNum++
+				c.lastReadSeqNum += 1
 			} else {
 				c.responseOrderedMessageChan <- nil
 			}
