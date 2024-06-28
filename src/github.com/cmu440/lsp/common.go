@@ -161,7 +161,7 @@ func (s *SlidingWindow) AdjustWindow() {
 			// Move lIndex to the next available slot
 			s.lIndex = (s.lIndex + 1) % s.windowSize
 			// Remove the message from the writeQueue
-			s.writeQueue.Pop()
+			heap.Pop(s.writeQueue)
 			// Increment the size
 			s.Size++
 			// Update lastSeqNum

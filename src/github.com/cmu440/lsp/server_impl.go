@@ -307,6 +307,8 @@ func (s *server) serverWorkerRoutine() {
 						if err != nil {
 							fmt.Println("Ack failed with error:", err)
 						}
+					} else {
+						fmt.Printf("message with unexpexted seq num received: %s\n", msgAndAddy.msg)
 					}
 				}
 			default:
@@ -345,7 +347,7 @@ func (s *server) serverWorkerRoutine() {
 			for _, stub := range s.clientConnections {
 				msg := stub.readQueue.Peek()
 				if (msg != nil) && (msg.(*Message).SeqNum == stub.lastReadSeqNum+1) {
-					_ = stub.readQueue.Pop()
+					_ = heap.Pop(stub.readQueue)
 					s.responseOrderedMessageChan <- msg.(*Message)
 					stub.lastReadSeqNum++
 					found = true
@@ -395,7 +397,7 @@ func (s *server) handleEpochEvent() {
 					if err != nil {
 						fmt.Println("Heartbeat failed with error:", err)
 					} else {
-						fmt.Println("Server sent HeartBeat")
+						//fmt.Println("Server sent HeartBeat")
 					}
 				}
 			} else {
@@ -445,7 +447,7 @@ func (s *server) Read() (int, []byte, error) {
 			break
 		}
 
-		//time.Sleep(10 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 	// Return a non-nil error if the connection with the client has been explicitly beenClosed
 	s.requestConnClosedChan <- msg.ConnID

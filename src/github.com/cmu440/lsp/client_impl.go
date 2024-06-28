@@ -275,6 +275,8 @@ func (c *client) clientWorkerRoutine() {
 					if err != nil {
 						fmt.Println("Ack failed with error:", err)
 					}
+				} else {
+					fmt.Printf("message with unexpexted seq num received: %s\n", msg)
 				}
 			default:
 				// Do nothing. client should ignore connect messages
@@ -300,7 +302,7 @@ func (c *client) clientWorkerRoutine() {
 		case <-c.requestOrderedMessageChan:
 			msg := c.readQueue.Peek()
 			if (msg != nil) && (msg.(*Message).SeqNum == c.lastReadSeqNum+1) {
-				_ = c.readQueue.Pop()
+				_ = heap.Pop(c.readQueue)
 				c.responseOrderedMessageChan <- msg.(*Message)
 				c.lastReadSeqNum += 1
 			} else {
@@ -346,7 +348,7 @@ func (c *client) handleEpochEvent() {
 				if err != nil {
 					fmt.Println("Heartbeat failed with error:", err)
 				} else {
-					fmt.Println("Client sent HeartBeat")
+					//fmt.Println("Client sent HeartBeat")
 				}
 			}
 		}
