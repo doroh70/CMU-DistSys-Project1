@@ -66,7 +66,7 @@ type SlidingWindow struct {
 	lastSeqNum         int // last sequence num to pass through window
 }
 
-func NewSlidingWindow(params *Params) *SlidingWindow {
+func NewSlidingWindow(params *Params, initialSeqNum int) *SlidingWindow {
 	// Implementation here
 	writeQueue := &MessageQueue{}
 	heap.Init(writeQueue)
@@ -80,6 +80,7 @@ func NewSlidingWindow(params *Params) *SlidingWindow {
 		maxBackOffInterval: params.MaxBackOffInterval,
 		currUnacked:        0,
 		maxUnacked:         params.MaxUnackedMessages,
+		lastSeqNum:         initialSeqNum,
 	}
 	return sw
 }

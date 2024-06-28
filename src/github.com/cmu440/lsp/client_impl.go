@@ -90,7 +90,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		readQueue:                        readQueue,
 		readSet:                          NewHashSetInt(),
 		lastReadSeqNum:                   initialSeqNum,
-		slidingWindow:                    NewSlidingWindow(params),
+		slidingWindow:                    NewSlidingWindow(params, initialSeqNum),
 		allSpawnedRoutinesTerminatedChan: make(chan bool, 1),
 		closeClientChan:                  make(chan bool),
 		closeReadRoutineChan:             make(chan bool, 1),
@@ -164,7 +164,7 @@ func (c *client) Read() ([]byte, error) {
 				return nil, errors.New("connection has been lost")
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 	return msg.Payload, nil
 	// (3) the server is closed ~ this is ambiguous af, so will ignore for now. Only thing I can think of right now that would check for this is a ICMP message. can do this
@@ -346,7 +346,7 @@ func (c *client) handleEpochEvent() {
 				if err != nil {
 					fmt.Println("Heartbeat failed with error:", err)
 				} else {
-					fmt.Println("Sent HeartBeat")
+					fmt.Println("Client sent HeartBeat")
 				}
 			}
 		}

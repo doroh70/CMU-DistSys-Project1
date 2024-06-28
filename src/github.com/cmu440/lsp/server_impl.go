@@ -267,7 +267,7 @@ func (s *server) serverWorkerRoutine() {
 							sequenceNumber:        msgAndAddy.msg.SeqNum,
 							readSet:               NewHashSetInt(),
 							readQueue:             readQueue,
-							slidingWindow:         NewSlidingWindow(s.params),
+							slidingWindow:         NewSlidingWindow(s.params, msgAndAddy.msg.SeqNum),
 							status:                active,
 						}
 						// add client stub to server clientConnections
@@ -395,7 +395,7 @@ func (s *server) handleEpochEvent() {
 					if err != nil {
 						fmt.Println("Heartbeat failed with error:", err)
 					} else {
-						fmt.Println("Sent HeartBeat")
+						fmt.Println("Server sent HeartBeat")
 					}
 				}
 			} else {
@@ -445,7 +445,7 @@ func (s *server) Read() (int, []byte, error) {
 			break
 		}
 
-		time.Sleep(1 * time.Millisecond)
+		//time.Sleep(10 * time.Millisecond)
 	}
 	// Return a non-nil error if the connection with the client has been explicitly beenClosed
 	s.requestConnClosedChan <- msg.ConnID
