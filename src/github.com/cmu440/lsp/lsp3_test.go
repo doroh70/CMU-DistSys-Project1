@@ -468,8 +468,8 @@ func TestServerCloseConns2(t *testing.T) {
 func TestClientClose1(t *testing.T) {
 	newCloseTestSystem(t, doClientClose).
 		setDescription("TestClientClose1: Client Close correctness").
-		setNumClients(1).
-		setMaxEpochs(1000).
+		setNumClients(2).
+		setMaxEpochs(10).
 		setParams(5, 500, 1, 1).
 		runTest()
 }
