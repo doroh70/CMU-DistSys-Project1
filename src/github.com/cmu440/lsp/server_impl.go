@@ -12,33 +12,36 @@ import (
 )
 
 type server struct {
-	numActiveConns                   int
-	activeConnAddresses              HashSetStr
-	beenClosed                       bool
-	params                           *Params
-	clientConnections                map[int]*clientStub
-	clientLostDuringClose            bool
-	sequentialConnId                 int
-	socket                           *lspnet.UDPConn
-	allSpawnedRoutinesTerminatedChan chan error
-	closeClientSessionChan           chan int
-	closeReadRoutineChan             chan bool //yet to use
-	closeServerChan                  chan bool
-	inboundMessageChan               chan *messageAndAddress
-	readRoutineClosedChan            chan bool
-	requestActiveConnChan            chan int
-	responseConnActiveChan           chan bool
-	requestConnClosedChan            chan int
-	responseConnClosedChan           chan bool
-	requestConnLostChan              chan int
-	responseConnLostChan             chan bool
-	requestMessageExistsChan         chan int
-	responseMessageExistsChan        chan bool
-	requestNewSequenceNumChan        chan int
-	responseNewSequenceNumChan       chan int
-	requestOrderedMessageChan        chan bool
-	responseOrderedMessageChan       chan *Message
-	writeChan                        chan *Message
+	numActiveConns                        int
+	activeConnAddresses                   HashSetStr
+	beenClosed                            bool
+	params                                *Params
+	clientConnections                     map[int]*clientStub
+	lostConnections                       map[int]*clientStub
+	clientLostDuringClose                 bool
+	sequentialConnId                      int
+	socket                                *lspnet.UDPConn
+	allSpawnedRoutinesTerminatedChan      chan error
+	closeClientSessionChan                chan int
+	closeReadRoutineChan                  chan bool //yet to use
+	closeServerChan                       chan bool
+	inboundMessageChan                    chan *messageAndAddress
+	readRoutineClosedChan                 chan bool
+	requestActiveConnChan                 chan int
+	responseConnActiveChan                chan bool
+	requestConnClosedChan                 chan int
+	responseConnClosedChan                chan bool
+	requestConnLostChan                   chan int
+	responseConnLostChan                  chan bool
+	requestGenericConnLostNoMessagesChan  chan bool
+	responseGenericConnLostNoMessagesChan chan int
+	requestMessageExistsChan              chan int
+	responseMessageExistsChan             chan bool
+	requestNewSequenceNumChan             chan int
+	responseNewSequenceNumChan            chan int
+	requestOrderedMessageChan             chan bool
+	responseOrderedMessageChan            chan *Message
+	writeChan                             chan *Message
 }
 
 type messageAndAddress struct {
@@ -104,33 +107,36 @@ func NewServer(port int, params *Params) (Server, error) {
 
 	// Create the server instance
 	srv := &server{
-		numActiveConns:                   0,
-		activeConnAddresses:              NewHashSetStr(),
-		beenClosed:                       false,
-		params:                           params,
-		clientConnections:                make(map[int]*clientStub),
-		clientLostDuringClose:            false,
-		sequentialConnId:                 1,
-		socket:                           conn,
-		allSpawnedRoutinesTerminatedChan: make(chan error),
-		closeClientSessionChan:           make(chan int),
-		closeReadRoutineChan:             make(chan bool, 1),
-		closeServerChan:                  make(chan bool),
-		inboundMessageChan:               make(chan *messageAndAddress),
-		readRoutineClosedChan:            make(chan bool, 1),
-		requestActiveConnChan:            make(chan int),
-		responseConnActiveChan:           make(chan bool),
-		requestConnClosedChan:            make(chan int),
-		responseConnClosedChan:           make(chan bool),
-		requestConnLostChan:              make(chan int),
-		responseConnLostChan:             make(chan bool),
-		requestMessageExistsChan:         make(chan int),
-		responseMessageExistsChan:        make(chan bool),
-		requestNewSequenceNumChan:        make(chan int),
-		responseNewSequenceNumChan:       make(chan int),
-		requestOrderedMessageChan:        make(chan bool),
-		responseOrderedMessageChan:       make(chan *Message),
-		writeChan:                        make(chan *Message),
+		numActiveConns:                        0,
+		activeConnAddresses:                   NewHashSetStr(),
+		beenClosed:                            false,
+		params:                                params,
+		clientConnections:                     make(map[int]*clientStub),
+		lostConnections:                       make(map[int]*clientStub),
+		clientLostDuringClose:                 false,
+		sequentialConnId:                      1,
+		socket:                                conn,
+		allSpawnedRoutinesTerminatedChan:      make(chan error),
+		closeClientSessionChan:                make(chan int),
+		closeReadRoutineChan:                  make(chan bool, 1),
+		closeServerChan:                       make(chan bool),
+		inboundMessageChan:                    make(chan *messageAndAddress),
+		readRoutineClosedChan:                 make(chan bool, 1),
+		requestActiveConnChan:                 make(chan int),
+		responseConnActiveChan:                make(chan bool),
+		requestConnClosedChan:                 make(chan int),
+		responseConnClosedChan:                make(chan bool),
+		requestConnLostChan:                   make(chan int),
+		responseConnLostChan:                  make(chan bool),
+		requestGenericConnLostNoMessagesChan:  make(chan bool),
+		responseGenericConnLostNoMessagesChan: make(chan int),
+		requestMessageExistsChan:              make(chan int),
+		responseMessageExistsChan:             make(chan bool),
+		requestNewSequenceNumChan:             make(chan int),
+		responseNewSequenceNumChan:            make(chan int),
+		requestOrderedMessageChan:             make(chan bool),
+		responseOrderedMessageChan:            make(chan *Message),
+		writeChan:                             make(chan *Message),
 	}
 
 	// Launch read and server worker routines
@@ -331,6 +337,20 @@ func (s *server) serverWorkerRoutine() {
 			checkConnState(id, closed)
 		case id := <-s.requestConnLostChan:
 			checkConnState(id, lost)
+		case <-s.requestGenericConnLostNoMessagesChan:
+			var found = false
+			// loop through lost connections, if one of them doesn't have any messages, remove from list and pass its id to responseChan
+			for id, stub := range s.lostConnections {
+				if stub.readQueue.Len() == 0 {
+					delete(s.lostConnections, id)
+					found = true
+					s.responseGenericConnLostNoMessagesChan <- id
+					break
+				}
+			}
+			if !found {
+				s.responseGenericConnLostNoMessagesChan <- 0
+			}
 		case id := <-s.requestMessageExistsChan:
 			if s.clientConnections[id] == nil || s.clientConnections[id].readQueue.Peek() == nil {
 				s.responseMessageExistsChan <- false
@@ -405,6 +425,7 @@ func (s *server) handleEpochEvent() {
 			} else {
 				// If the epoch limit is reached, signal that the connection is lost
 				stub.status = lost
+				s.lostConnections[id] = stub
 				fmt.Printf("Epoch limit reached for client connection with address : %s.\n", stub.addr)
 				if s.beenClosed {
 					s.clientLostDuringClose = true
@@ -449,6 +470,13 @@ func (s *server) Read() (int, []byte, error) {
 			break
 		}
 
+		// Return a non-nil error if a connection with any client has been lost and no other messages are waiting to be returned from said client
+		s.requestGenericConnLostNoMessagesChan <- true
+		id := <-s.responseGenericConnLostNoMessagesChan
+		if id != 0 {
+			return id, nil, errors.New("connection has been lost")
+		}
+
 		time.Sleep(1 * time.Millisecond)
 	}
 	// Return a non-nil error if the connection with the client has been explicitly closed
@@ -456,17 +484,6 @@ func (s *server) Read() (int, []byte, error) {
 	beenClosed := <-s.responseConnClosedChan
 	if beenClosed {
 		return msg.ConnID, nil, errors.New("connection has been beenClosed")
-	}
-
-	// Return a non-nil error if the connection with the client has been lost and no other messages are waiting to be returned
-	s.requestConnLostChan <- msg.ConnID
-	connLost := <-s.responseConnLostChan
-	if connLost {
-		s.requestMessageExistsChan <- msg.ConnID
-		exists := <-s.responseMessageExistsChan
-		if !exists {
-			return msg.ConnID, nil, errors.New("connection has been lost")
-		}
 	}
 
 	return msg.ConnID, msg.Payload, nil

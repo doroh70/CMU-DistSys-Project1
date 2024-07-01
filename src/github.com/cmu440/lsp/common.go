@@ -230,7 +230,7 @@ func (s *SlidingWindow) SendWindowWithBackOff(conn *lspnet.UDPConn, addr *lspnet
 		// If currBackOffTimer reaches 0, send the message
 		if msg.currBackOffTimer == 0 {
 			// Check if we can send more unacknowledged messages or if this is a resend
-			if s.currUnacked < s.maxUnacked || msg.sent {
+			if (s.currUnacked < s.maxUnacked || msg.sent) && !msg.acked {
 				// Send the message
 				err := SendMessage(conn, msg.message, addr, 3)
 				if err != nil {
@@ -242,11 +242,13 @@ func (s *SlidingWindow) SendWindowWithBackOff(conn *lspnet.UDPConn, addr *lspnet
 				dataSent = true
 
 				// Update currentBackOff exponentially
-				if msg.currentBackOff < s.maxBackOffInterval {
+				if msg.currentBackOff == 0 {
+					msg.currentBackOff = 1
+				} else {
 					msg.currentBackOff *= 2
-					if msg.currentBackOff > s.maxBackOffInterval {
-						msg.currentBackOff = s.maxBackOffInterval
-					}
+				}
+				if msg.currentBackOff > s.maxBackOffInterval {
+					msg.currentBackOff = s.maxBackOffInterval
 				}
 
 				// After sending, reset currBackOffTimer to new currentBackOff
