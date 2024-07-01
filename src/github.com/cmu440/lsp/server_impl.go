@@ -237,9 +237,12 @@ func (s *server) serverWorkerRoutine() {
 			var stub *clientStub
 			acknowledgeFunc := func(cumulative bool) {
 				if stub.slidingWindow.ValidAck(msgAndAddy.msg.SeqNum) {
+					stub.currentEpochsElapsed = 0 // reset epochLimit counter
 					stub.slidingWindow.AcknowledgeMessage(msgAndAddy.msg.SeqNum, cumulative)
 					stub.slidingWindow.AdjustWindow()
 					stub.dataSentLastEpoch = stub.slidingWindow.SendNewlyAdmittedToWindow(s.socket, stub.addr)
+				} else if stub.slidingWindow.Size+stub.slidingWindow.writeQueue.Len() == 0 && msgAndAddy.msg.SeqNum == 0 {
+					stub.currentEpochsElapsed = 0 // reset epochLimit counter if no messages to send and ack is seq # 0
 				}
 			}
 
@@ -280,14 +283,14 @@ func (s *server) serverWorkerRoutine() {
 			case MsgAck:
 				if s.activeConnAddresses.Contains(msgAndAddy.addr.String()) && s.clientConnections[msgAndAddy.msg.ConnID] != nil {
 					stub = s.clientConnections[msgAndAddy.msg.ConnID]
-					stub.currentEpochsElapsed = 0 // reset epochLimit counter
+					//stub.currentEpochsElapsed = 0 // reset epochLimit counter if no messages to send and ack is seq # 0
 					acknowledgeFunc(false)
 					s.mightTerminateClientConnection(msgAndAddy.msg.ConnID)
 				}
 			case MsgCAck:
 				if s.activeConnAddresses.Contains(msgAndAddy.addr.String()) && s.clientConnections[msgAndAddy.msg.ConnID] != nil {
 					stub = s.clientConnections[msgAndAddy.msg.ConnID]
-					stub.currentEpochsElapsed = 0 // reset epochLimit counter
+					//stub.currentEpochsElapsed = 0 // reset epochLimit counter if no messages to send and ack is seq # 0
 					acknowledgeFunc(true)
 					s.mightTerminateClientConnection(msgAndAddy.msg.ConnID)
 				}
@@ -381,7 +384,6 @@ func (s *server) serverWorkerRoutine() {
 
 func (s *server) handleEpochEvent() {
 	for id, stub := range s.clientConnections {
-		// if not lost or closeOpFinished, do below
 		if stub.status != lost && stub.closeOpFinished == false {
 			// increment the epochs elapsed counter
 			stub.currentEpochsElapsed++
@@ -408,27 +410,27 @@ func (s *server) handleEpochEvent() {
 					s.clientLostDuringClose = true
 				}
 				s.numActiveConns--
-				// if active conns  = 0, do below
-				if s.numActiveConns == 0 && s.beenClosed {
-					// close connection
-					err := s.socket.Close()
-					if err != nil {
-						fmt.Println("Failed to close LSP server socket:", err)
-						return
-					}
-					s.closeReadRoutineChan <- true
-				}
 			}
 			stub.dataSentLastEpoch = false
 
+		}
+		// if active conns  = 0, do below
+		if s.numActiveConns == 0 && s.beenClosed {
+			// close connection
+			err := s.socket.Close()
+			if err != nil {
+				fmt.Println("Failed to close LSP server socket:", err)
+				return
+			}
+			s.closeReadRoutineChan <- true
 		}
 	}
 }
 
 func (s *server) mightTerminateClientConnection(id int) {
-	// if status is closed and there are no more messages to send/ be acknowledged -> stub.CloseFin = true
+	// if status is closed or server closed and there are no more messages to send/ be acknowledged -> stub.CloseFin = true
 	if stub := s.clientConnections[id]; stub != nil {
-		if stub.status == closed && !stub.closeOpFinished {
+		if (stub.status == closed || s.beenClosed == true) && !stub.closeOpFinished {
 			if stub.slidingWindow.Size+stub.slidingWindow.writeQueue.Len() == 0 {
 				stub.closeOpFinished = true
 				s.numActiveConns--
@@ -449,7 +451,7 @@ func (s *server) Read() (int, []byte, error) {
 
 		time.Sleep(1 * time.Millisecond)
 	}
-	// Return a non-nil error if the connection with the client has been explicitly beenClosed
+	// Return a non-nil error if the connection with the client has been explicitly closed
 	s.requestConnClosedChan <- msg.ConnID
 	beenClosed := <-s.responseConnClosedChan
 	if beenClosed {

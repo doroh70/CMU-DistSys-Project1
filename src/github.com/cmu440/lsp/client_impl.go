@@ -156,8 +156,8 @@ func (c *client) Read() ([]byte, error) {
 		}
 		// Return a non-nil error if the connection with the server has been lost and no other messages are waiting to be returned
 		c.requestConnLostChan <- true
-		connLost := <-c.responseConnLostChan
-		if connLost {
+		connecLost := <-c.responseConnLostChan
+		if connecLost {
 			c.requestMessageExistsChan <- true
 			exists := <-c.responseMessageExistsChan
 			if !exists {
@@ -283,7 +283,6 @@ func (c *client) clientWorkerRoutine() {
 			}
 		case <-c.readRoutineClosedChan:
 			if c.beenClosed {
-				fmt.Println("Closing")
 				return
 			}
 		case <-c.requestBeenClosedChan:
