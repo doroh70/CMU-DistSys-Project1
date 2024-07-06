@@ -191,7 +191,7 @@ func (s *SlidingWindow) SendNewlyAdmittedToWindow(conn *lspnet.UDPConn, addr *ls
 				// Send the message using SendMessage
 				err := SendMessage(conn, s.window[index].message, addr, 3)
 				if err != nil {
-					fmt.Printf("Error sending message in window: %s, error: %v\n", s.window[index].message.String(), err)
+					// fmt.Printf("Error sending message in window: %s, error: %v\n", s.window[index].message.String(), err)
 					continue
 				}
 
@@ -234,7 +234,7 @@ func (s *SlidingWindow) SendWindowWithBackOff(conn *lspnet.UDPConn, addr *lspnet
 				// Send the message
 				err := SendMessage(conn, msg.message, addr, 3)
 				if err != nil {
-					fmt.Printf("Error sending message in window: %s, error: %v\n", s.window[index].message.String(), err)
+					// fmt.Printf("Error sending message in window: %s, error: %v\n", s.window[index].message.String(), err)
 					continue
 				}
 
@@ -344,7 +344,7 @@ func SendMessage(conn *lspnet.UDPConn, msg *Message, addr *lspnet.UDPAddr, maxRe
 			// If write is successful, exit the loop
 			return nil
 		}
-		fmt.Printf("Attempt %d: Error sending message: %s, error: %v\n", attempt, msg.String(), err)
+		// fmt.Printf("Attempt %d: Error sending message: %s, error: %v\n", attempt, msg.String(), err)
 	}
 	// Return the error after maxRetries attempts
 	return fmt.Errorf("after %d attempts, failed to send message: %s, error: %v", maxRetries, msg.String(), err)

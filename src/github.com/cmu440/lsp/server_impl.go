@@ -162,14 +162,14 @@ func (s *server) readAndProcessPacket() {
 	buffer := make([]byte, 2000)
 	bytesRead, addr, err := s.socket.ReadFromUDP(buffer)
 	if err != nil {
-		fmt.Println("Error reading from connection:", err)
+		// fmt.Println("Error reading from connection:", err)
 		return
 	}
 
 	validBuffer := buffer[:bytesRead]
 	msg, err := s.unmarshalAndVerifyMessage(validBuffer)
 	if err != nil {
-		fmt.Println("Error processing message:", err)
+		// fmt.Println("Error processing message:", err)
 		return
 	}
 
@@ -261,7 +261,7 @@ func (s *server) serverWorkerRoutine() {
 					s.sequentialConnId++
 					err := SendMessage(s.socket, ack, msgAndAddy.addr, 3)
 					if err != nil {
-						fmt.Println("Ack failed with error:", err)
+						// fmt.Println("Ack failed with error:", err)
 					} else {
 						readQueue := &MessageQueue{}
 						heap.Init(readQueue)
@@ -314,15 +314,14 @@ func (s *server) serverWorkerRoutine() {
 						ack := NewAck(msgAndAddy.msg.ConnID, msgAndAddy.msg.SeqNum)
 						err := SendMessage(s.socket, ack, msgAndAddy.addr, 3)
 						if err != nil {
-							fmt.Println("Ack failed with error:", err)
+							// fmt.Println("Ack failed with error:", err)
 						}
 					} else {
-						fmt.Printf("message with unexpexted seq num received: %s\n", msgAndAddy.msg)
+						// fmt.Printf("message with unexpexted seq num received: %s\n", msgAndAddy.msg)
 					}
 				}
 			default:
 				// Undefined behaviour
-				fmt.Println("Undefined")
 			}
 		case <-s.readRoutineClosedChan:
 			if s.clientLostDuringClose {
@@ -417,16 +416,16 @@ func (s *server) handleEpochEvent() {
 					heartBeat := NewAck(id, 0)
 					err := SendMessage(s.socket, heartBeat, stub.addr, 3)
 					if err != nil {
-						fmt.Println("Heartbeat failed with error:", err)
+						// fmt.Println("Heartbeat failed with error:", err)
 					} else {
-						//fmt.Println("Server sent HeartBeat")
+						// fmt.Println("Server sent HeartBeat")
 					}
 				}
 			} else {
 				// If the epoch limit is reached, signal that the connection is lost
 				stub.status = lost
 				s.lostConnections[id] = stub
-				fmt.Printf("Epoch limit reached for client connection with address : %s.\n", stub.addr)
+				// fmt.Printf("Epoch limit reached for client connection with address : %s.\n", stub.addr)
 				if s.beenClosed {
 					s.clientLostDuringClose = true
 				}
@@ -440,7 +439,7 @@ func (s *server) handleEpochEvent() {
 			// close connection
 			err := s.socket.Close()
 			if err != nil {
-				fmt.Println("Failed to close LSP server socket:", err)
+				// fmt.Println("Failed to close LSP server socket:", err)
 				return
 			}
 			s.closeReadRoutineChan <- true

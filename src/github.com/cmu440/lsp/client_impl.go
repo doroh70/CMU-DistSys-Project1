@@ -209,7 +209,7 @@ func (c *client) clientWorkerRoutine() {
 	connMsg := NewConnect(c.initialSequenceNumber)
 	err := SendMessage(c.conn, connMsg, nil, 3)
 	if err != nil {
-		fmt.Println("Failed to establish connection:", err)
+		// fmt.Println("Failed to establish connection:", err)
 	} else {
 		c.dataSentLastEpoch = true
 	}
@@ -273,10 +273,10 @@ func (c *client) clientWorkerRoutine() {
 					ack := NewAck(msg.ConnID, msg.SeqNum)
 					err := SendMessage(c.conn, ack, nil, 3)
 					if err != nil {
-						fmt.Println("Ack failed with error:", err)
+						// fmt.Println("Ack failed with error:", err)
 					}
 				} else {
-					fmt.Printf("message with unexpexted seq num received: %s\n", msg)
+					// fmt.Printf("message with unexpexted seq num received: %s\n", msg)
 				}
 			default:
 				// Do nothing. client should ignore connect messages
@@ -335,7 +335,7 @@ func (c *client) handleEpochEvent() {
 			connMsg := NewConnect(c.initialSequenceNumber)
 			err := SendMessage(c.conn, connMsg, nil, 3)
 			if err != nil {
-				fmt.Println("Connect failed with error:", err)
+				// fmt.Println("Connect failed with error:", err)
 			}
 		} else {
 			// resend packets in sliding window (with maxUnacked constraint) that have not yet been acknowledged, according to exponential back off rules. (make SendWindowWithBackOff call)
@@ -345,15 +345,15 @@ func (c *client) handleEpochEvent() {
 				heartBeat := NewAck(c.connectionId, 0)
 				err := SendMessage(c.conn, heartBeat, nil, 3)
 				if err != nil {
-					fmt.Println("Heartbeat failed with error:", err)
+					// fmt.Println("Heartbeat failed with error:", err)
 				} else {
-					//fmt.Println("Client sent HeartBeat")
+					// fmt.Println("Client sent HeartBeat")
 				}
 			}
 		}
 	} else {
 		// If the epoch limit is reached, signal that the connection is lost and stop epoch ticker
-		fmt.Println("Epoch limit reached.")
+		// fmt.Println("Epoch limit reached.")
 		c.epochTicker.Stop()
 		c.isConnLost = true
 		if !c.connAckReceived {
@@ -364,7 +364,7 @@ func (c *client) handleEpochEvent() {
 		// close connection
 		err := c.conn.Close()
 		if err != nil {
-			fmt.Println("Failed to close LSP connection:", err)
+			// fmt.Println("Failed to close LSP connection:", err)
 			return
 		}
 	}
@@ -389,14 +389,14 @@ func (c *client) readAndProcessPacket() {
 	buffer := make([]byte, 2000)
 	bytesRead, err := c.conn.Read(buffer)
 	if err != nil {
-		fmt.Println("Error reading from connection:", err)
+		// fmt.Println("Error reading from connection:", err)
 		return
 	}
 
 	validBuffer := buffer[:bytesRead]
 	msg, err := c.unmarshalAndVerifyMessage(validBuffer)
 	if err != nil {
-		fmt.Println("Error processing message:", err)
+		// fmt.Println("Error processing message:", err)
 		return
 	}
 
