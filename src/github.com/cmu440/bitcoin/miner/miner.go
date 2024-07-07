@@ -17,6 +17,8 @@ func joinWithServer(hostport string) (lsp.Client, error) {
 	seed := rand.NewSource(time.Now().UnixNano())
 	isn := rand.New(seed).Intn(int(math.Pow(2, 8)))
 
+	_ = isn
+
 	// TODO: implement this!
 
 	return nil, nil
