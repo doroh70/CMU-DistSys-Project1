@@ -1,8 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"log"
+	"github.com/cmu440/bitcoin"
 	"math"
 	"math/rand"
 	"os"
@@ -17,25 +18,34 @@ func joinWithServer(hostport string) (lsp.Client, error) {
 	seed := rand.NewSource(time.Now().UnixNano())
 	isn := rand.New(seed).Intn(int(math.Pow(2, 8)))
 
-	_ = isn
+	client, err := lsp.NewClient(hostport, isn, lsp.NewParams())
 
-	// TODO: implement this!
+	if err != nil {
+		bitcoin.ERROR.Println("Failed to connect to server: ", err)
+		return nil, err
+	}
 
-	return nil, nil
+	// Send join message to server
+	joinMsg := bitcoin.NewJoin()
+	marshalledJoin, err := json.Marshal(joinMsg)
+	if err != nil {
+		bitcoin.ERROR.Printf("Error marshalling miner join message : %s\n", err)
+		return nil, err
+	}
+
+	// Write message to client
+	err = client.Write(marshalledJoin)
+	if err != nil {
+		return nil, err
+	}
+
+	return client, nil
 }
 
-var LOGF *log.Logger
-
 func main() {
-	// You may need a logger for debug purpose
-	const (
-		name = "minerLog.txt"
-		flag = os.O_RDWR | os.O_CREATE
-		perm = os.FileMode(0666)
-	)
-
-	file, err := os.OpenFile(name, flag, perm)
+	file, err := bitcoin.InitLoggers()
 	if err != nil {
+		fmt.Printf("Failed to initialize loggers %s.\n", err)
 		return
 	}
 	defer file.Close()
@@ -55,5 +65,6 @@ func main() {
 
 	defer miner.Close()
 
-	// TODO: implement this!
+	// mine loop
+	// modify the startup commands to specify how many miner threads to use and also therefore the size of the job chunk when starting the server
 }
