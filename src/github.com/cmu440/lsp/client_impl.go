@@ -285,6 +285,7 @@ func (c *client) clientWorkerRoutine() {
 			if c.beenClosed {
 				return
 			}
+			c.allSpawnedRoutinesTerminatedChan <- true
 		case <-c.requestBeenClosedChan:
 			c.responseBeenClosedChan <- c.beenClosed
 		case <-c.requestConnLostChan:

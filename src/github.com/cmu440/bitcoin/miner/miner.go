@@ -32,7 +32,6 @@ func joinWithServer(hostport string) (lsp.Client, error) {
 		return nil, err
 	}
 
-	// Write message to client
 	err = client.Write(marshalledJoin)
 	if err != nil {
 		return nil, err
@@ -42,13 +41,6 @@ func joinWithServer(hostport string) (lsp.Client, error) {
 }
 
 func main() {
-	file, err := bitcoin.InitLoggers()
-	if err != nil {
-		fmt.Printf("Failed to initialize loggers %s.\n", err)
-		return
-	}
-	defer file.Close()
-
 	const numArgs = 2
 	if len(os.Args) != numArgs {
 		fmt.Printf("Usage: ./%s <hostport>", os.Args[0])
@@ -56,11 +48,20 @@ func main() {
 	}
 
 	hostport := os.Args[1]
+
+	file, err := bitcoin.InitLoggers(fmt.Sprintf("miner%s", hostport))
+	if err != nil {
+		fmt.Printf("Failed to initialize loggers %s.\n", err)
+		return
+	}
+	defer file.Close()
+
 	miner, err := joinWithServer(hostport)
 	if err != nil {
 		bitcoin.ERROR.Println("Failed to join with server:", err)
 		return
 	}
+	bitcoin.INFO.Println("Joined with server!")
 
 	defer miner.Close()
 
@@ -72,6 +73,8 @@ func main() {
 			bitcoin.ERROR.Println("Server connection lost:", err)
 			return
 		}
+		bitcoin.INFO.Println("Received a batch job from the server")
+
 		unmarshalledRequest := &bitcoin.Message{}
 		err = json.Unmarshal(byteRequest, unmarshalledRequest)
 		if err != nil {
@@ -83,13 +86,19 @@ func main() {
 		// Obtain response
 		response := MineSmallestNonce(unmarshalledRequest)
 		if response == nil {
-			bitcoin.ERROR.Println("Invalid batch job:", response.String())
+			bitcoin.ERROR.Println("Invalid batch job:", unmarshalledRequest.String())
 			return
 		}
+		bitcoin.INFO.Printf("Mined smallest nonce: %v with hash %v\n", response.Nonce, response.Hash)
 
 		//Send to server
 		marshalledResp, _ := json.Marshal(response)
-		miner.Write(marshalledResp)
+		err = miner.Write(marshalledResp)
+		if err != nil {
+			bitcoin.ERROR.Println("Failed to send response to server:", err)
+			return
+		}
+		bitcoin.INFO.Println("Sent mined result to server")
 	}
 }
 

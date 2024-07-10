@@ -21,28 +21,30 @@ func main() {
 		return
 	}
 
-	file, err := bitcoin.InitLoggers()
+	hostport := os.Args[1]
+	message := os.Args[2]
+	maxNonce, err := strconv.ParseUint(os.Args[3], 10, 64)
+	if err != nil {
+		fmt.Printf("%s is not a number.\n", os.Args[3])
+		return
+	}
+	seed := rand.NewSource(time.Now().UnixNano())
+	isn := rand.New(seed).Intn(int(math.Pow(2, 8)))
+
+	file, err := bitcoin.InitLoggers(fmt.Sprintf("client_%s", hostport))
 	if err != nil {
 		fmt.Printf("Failed to initialize loggers %s.\n", err)
 		return
 	}
 	defer file.Close()
 
-	hostport := os.Args[1]
-	message := os.Args[2]
-	maxNonce, err := strconv.ParseUint(os.Args[3], 10, 64)
-	if err != nil {
-		bitcoin.ERROR.Printf("%s is not a number.\n", os.Args[3])
-		return
-	}
-	seed := rand.NewSource(time.Now().UnixNano())
-	isn := rand.New(seed).Intn(int(math.Pow(2, 8)))
-
 	client, err := lsp.NewClient(hostport, isn, lsp.NewParams())
 	if err != nil {
-		bitcoin.ERROR.Println("Failed to connect to server: ", err)
+		fmt.Println("Failed to connect to server: ", err)
 		return
 	}
+
+	bitcoin.INFO.Println("Connected to server!")
 
 	defer client.Close()
 
@@ -55,14 +57,15 @@ func main() {
 	}
 	err = client.Write(marshalledReq)
 	if err != nil {
-		printDisconnected()
+		printDisconnected(err)
 		return
 	}
+	bitcoin.INFO.Println("Sent client request to server!")
 
 	// Process server response
 	byteResponse, err := client.Read()
 	if err != nil {
-		printDisconnected()
+		printDisconnected(err)
 		return
 	}
 
@@ -74,7 +77,7 @@ func main() {
 		return
 	}
 
-	if unmarshalledResponse.Type != bitcoin.Result || unmarshalledResponse.Nonce < 0 || unmarshalledResponse.Nonce > maxNonce {
+	if unmarshalledResponse.Type != bitcoin.Result || unmarshalledResponse.Nonce > maxNonce {
 		bitcoin.ERROR.Printf("Invalid server response: %s\n", unmarshalledResponse.String())
 		return
 	}
@@ -89,7 +92,7 @@ func printResult(hash, nonce uint64) {
 }
 
 // printDisconnected prints a disconnected message to stdout.
-func printDisconnected() {
-	bitcoin.ERROR.Println("Disconnected")
+func printDisconnected(err error) {
+	bitcoin.ERROR.Println("Disconnected: ", err)
 	fmt.Println("Disconnected")
 }
