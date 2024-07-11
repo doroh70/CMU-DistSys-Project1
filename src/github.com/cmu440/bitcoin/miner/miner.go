@@ -20,7 +20,7 @@ func joinWithServer(hostport string) (lsp.Client, error) {
 	client, err := lsp.NewClient(hostport, isn, lsp.NewParams())
 
 	if err != nil {
-		bitcoin.ERROR.Println("Failed to connect to server: ", err)
+		fmt.Println("Failed to connect to server: ", err)
 		return nil, err
 	}
 
@@ -28,7 +28,7 @@ func joinWithServer(hostport string) (lsp.Client, error) {
 	joinMsg := bitcoin.NewJoin()
 	marshalledJoin, err := json.Marshal(joinMsg)
 	if err != nil {
-		bitcoin.ERROR.Printf("Error marshalling miner join message : %s\n", err)
+		fmt.Printf("Error marshalling miner join message : %s\n", err)
 		return nil, err
 	}
 
