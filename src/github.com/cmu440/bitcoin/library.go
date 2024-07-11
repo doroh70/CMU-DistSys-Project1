@@ -52,7 +52,7 @@ func (job *Job) UpdateWaitTime() {
 	job.WaitTime = job.WaitTime + 10
 }
 
-// UpdateResponseRatio calculates updates job response ratio
+// UpdateResponseRatio updates job response ratio
 func (job *Job) UpdateResponseRatio() {
 	job.ResponseRatio = float64(job.WaitTime) / float64(job.ComputeTime)
 }

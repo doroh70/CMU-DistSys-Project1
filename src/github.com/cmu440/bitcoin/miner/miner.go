@@ -49,19 +49,20 @@ func main() {
 
 	hostport := os.Args[1]
 
-	file, err := bitcoin.InitLoggers(fmt.Sprintf("miner%s", hostport))
+	miner, err := joinWithServer(hostport)
+	if err != nil {
+		fmt.Println("Failed to join with server:", err)
+		return
+	}
+
+	file, err := bitcoin.InitLoggers(fmt.Sprintf("miner_%d", miner.ConnID()))
 	if err != nil {
 		fmt.Printf("Failed to initialize loggers %s.\n", err)
 		return
 	}
-	defer file.Close()
-
-	miner, err := joinWithServer(hostport)
-	if err != nil {
-		bitcoin.ERROR.Println("Failed to join with server:", err)
-		return
-	}
 	bitcoin.INFO.Println("Joined with server!")
+
+	defer file.Close()
 
 	defer miner.Close()
 
@@ -89,7 +90,7 @@ func main() {
 			bitcoin.ERROR.Println("Invalid batch job:", unmarshalledRequest.String())
 			return
 		}
-		bitcoin.INFO.Printf("Mined smallest nonce: %v with hash %v\n", response.Nonce, response.Hash)
+		bitcoin.INFO.Printf("Successfully mined the smallest hash: %v using nonce: %v\n", response.Hash, response.Nonce)
 
 		//Send to server
 		marshalledResp, _ := json.Marshal(response)

@@ -108,6 +108,7 @@ func (s *server) serverLoop() {
 			for _, job := range *s.jobQueue {
 				job.UpdateWaitTime()
 				job.UpdateResponseRatio()
+				// could do a heap.Fix, but this is more costly than just heapifying the whole queue at the end
 			}
 			// Re-heapify the entire queue after all updates. Costly gotta find a better sln...
 			heap.Init(s.jobQueue)
@@ -131,8 +132,7 @@ func (s *server) processMessage(dataRead *readResult) {
 			if s.minerJobs[dataRead.connId] != nil {
 				jobs := s.minerJobs[dataRead.connId]
 				for _, job := range jobs {
-					s.jobQueue.Push(job)
-					// heap.Push(s.jobQueue, job) This is too expensive for large requests. Let's only maintain heap property at ticker event and right before we send job to miner
+					heap.Push(s.jobQueue, job)
 				}
 				delete(s.minerJobs, dataRead.connId)
 			}
@@ -215,16 +215,15 @@ func (s *server) processMessage(dataRead *readResult) {
 					}
 					delete(s.clientRequestMap, cliId) // delete regardless
 				}
-
-				// Miner no longer has active jobs, since miner can only have 1 at a time
-				delete(s.minerJobs, minerId)
 			}
+			// Miner no longer has active jobs, since miner can only have 1 at a time
+			delete(s.minerJobs, minerId)
 		}
 	}
 }
 
 func splitRequestIntoJobs(clientId int, cliRequest *bitcoin.Message) []*bitcoin.Job {
-	jobSize := uint64(10000)
+	jobSize := uint64(40000)
 	var jobs []*bitcoin.Job
 	for start := cliRequest.Lower; start <= cliRequest.Upper; start += jobSize {
 		end := start + jobSize - 1
@@ -236,7 +235,7 @@ func splitRequestIntoJobs(clientId int, cliRequest *bitcoin.Message) []*bitcoin.
 			Message:       &cliRequest.Data,
 			Lower:         start,
 			Upper:         end,
-			ComputeTime:   calculateComputeTime(&cliRequest.Data, start, end),
+			ComputeTime:   calculateComputeTime(&cliRequest.Data, cliRequest.Upper, cliRequest.Lower),
 			WaitTime:      0,
 			ResponseRatio: 0,
 		}
@@ -248,7 +247,7 @@ func splitRequestIntoJobs(clientId int, cliRequest *bitcoin.Message) []*bitcoin.
 }
 
 // Function to calculate compute time
-func calculateComputeTime(message *string, lower, upper uint64) uint64 {
+func calculateComputeTime(message *string, upper, lower uint64) uint64 {
 	msgLength := uint64(len(*message))
 	numBlocks := (msgLength + 63) / 64 // SHA-256 processes data in 64-byte blocks
 	return numBlocks * (upper - lower + 1)
@@ -280,7 +279,7 @@ func (s *server) querySend() {
 		if s.minerJobs[minerId] == nil {
 			// Check if there's a job available in the job queue
 			if s.jobQueue.Len() > 0 {
-				heap.Init(s.jobQueue)
+				//heap.Init(s.jobQueue)
 				job := heap.Pop(s.jobQueue).(*bitcoin.Job)
 				s.minerJobs[minerId] = []*bitcoin.Job{job}
 

@@ -31,18 +31,18 @@ func main() {
 	seed := rand.NewSource(time.Now().UnixNano())
 	isn := rand.New(seed).Intn(int(math.Pow(2, 8)))
 
-	file, err := bitcoin.InitLoggers(fmt.Sprintf("client_%s", hostport))
-	if err != nil {
-		fmt.Printf("Failed to initialize loggers %s.\n", err)
-		return
-	}
-	defer file.Close()
-
 	client, err := lsp.NewClient(hostport, isn, lsp.NewParams())
 	if err != nil {
 		fmt.Println("Failed to connect to server: ", err)
 		return
 	}
+
+	file, err := bitcoin.InitLoggers(fmt.Sprintf("client_%d", client.ConnID()))
+	if err != nil {
+		fmt.Printf("Failed to initialize loggers %s.\n", err)
+		return
+	}
+	defer file.Close()
 
 	bitcoin.INFO.Println("Connected to server!")
 
