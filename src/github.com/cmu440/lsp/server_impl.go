@@ -94,7 +94,7 @@ type clientStub struct {
 // there was an error resolving or listening on the specified port number.
 func NewServer(port int, params *Params) (Server, error) {
 	// Resolve the UDP address to bind to
-	addr, err := lspnet.ResolveUDPAddr("udp", fmt.Sprintf("localhost:%d", port))
+	addr, err := lspnet.ResolveUDPAddr("udp", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve UDP address: %v", err)
 	}
