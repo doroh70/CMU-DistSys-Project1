@@ -22,6 +22,7 @@ type client struct {
 	epochTicker                      *time.Ticker
 	isConnLost                       bool
 	initialSequenceNumber            int // This value should only be instantiated in NewClient method
+	numMessagesToReturn              int
 	params                           *Params
 	sequenceNumber                   int
 	readQueue                        *MessageQueue
@@ -137,34 +138,20 @@ func (c *client) Read() ([]byte, error) {
 	if beenClosed {
 		return nil, errors.New("client has been closed")
 	}
+	var msg *Message
+
+	c.requestOrderedMessageChan <- true
+	msg = <-c.responseOrderedMessageChan
+
 	// Return a non-nil error if the connection with the server has been lost and no other messages are waiting to be returned
 	c.requestConnLostChan <- true
-	connLost := <-c.responseConnLostChan
-	if connLost {
+	connecLost := <-c.responseConnLostChan
+	if connecLost {
 		c.requestMessageExistsChan <- true
 		exists := <-c.responseMessageExistsChan
 		if !exists {
 			return nil, errors.New("connection has been lost")
 		}
-	}
-	var msg *Message
-	for {
-		c.requestOrderedMessageChan <- true
-		msg = <-c.responseOrderedMessageChan
-		if msg != nil {
-			break
-		}
-		// Return a non-nil error if the connection with the server has been lost and no other messages are waiting to be returned
-		c.requestConnLostChan <- true
-		connecLost := <-c.responseConnLostChan
-		if connecLost {
-			c.requestMessageExistsChan <- true
-			exists := <-c.responseMessageExistsChan
-			if !exists {
-				return nil, errors.New("connection has been lost")
-			}
-		}
-		time.Sleep(1 * time.Millisecond)
 	}
 	return msg.Payload, nil
 	// (3) the server is closed ~ this is ambiguous af, so will ignore for now. Only thing I can think of right now that would check for this is a ICMP message. can do this
@@ -268,6 +255,12 @@ func (c *client) clientWorkerRoutine() {
 					if !c.readSet.Contains(msg.SeqNum) {
 						c.readSet.Add(msg.SeqNum)
 						heap.Push(c.readQueue, msg)
+						if msg.SeqNum == c.lastReadSeqNum+1 && c.numMessagesToReturn > 0 {
+							_ = heap.Pop(c.readQueue)
+							c.responseOrderedMessageChan <- msg
+							c.lastReadSeqNum += 1
+							c.numMessagesToReturn--
+						}
 					}
 					// send ack
 					ack := NewAck(msg.ConnID, msg.SeqNum)
@@ -306,7 +299,7 @@ func (c *client) clientWorkerRoutine() {
 				c.responseOrderedMessageChan <- msg.(*Message)
 				c.lastReadSeqNum += 1
 			} else {
-				c.responseOrderedMessageChan <- nil
+				c.numMessagesToReturn++
 			}
 		case msg := <-c.writeChan:
 			if msg != nil {
@@ -364,6 +357,9 @@ func (c *client) handleEpochEvent() {
 		c.closeReadRoutineChan <- true
 		// close connection
 		err := c.conn.Close()
+		for ; c.numMessagesToReturn > 0; c.numMessagesToReturn-- {
+			c.responseOrderedMessageChan <- nil
+		}
 		if err != nil {
 			// fmt.Println("Failed to close LSP connection:", err)
 			return

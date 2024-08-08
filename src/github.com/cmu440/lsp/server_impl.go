@@ -13,6 +13,8 @@ import (
 
 type server struct {
 	numActiveConns                        int
+	numLostMessagesToReturn               int
+	numMessagesToReturn                   int
 	activeConnAddresses                   HashSetStr
 	beenClosed                            bool
 	params                                *Params
@@ -309,6 +311,12 @@ func (s *server) serverWorkerRoutine() {
 						if !stub.readSet.Contains(msgAndAddy.msg.SeqNum) {
 							stub.readSet.Add(msgAndAddy.msg.SeqNum)
 							heap.Push(stub.readQueue, msgAndAddy.msg)
+							if msgAndAddy.msg.SeqNum == stub.lastReadSeqNum+1 && s.numMessagesToReturn > 0 {
+								_ = heap.Pop(stub.readQueue)
+								s.responseOrderedMessageChan <- msgAndAddy.msg
+								stub.lastReadSeqNum += 1
+								s.numMessagesToReturn--
+							}
 						}
 						// send ack
 						ack := NewAck(msgAndAddy.msg.ConnID, msgAndAddy.msg.SeqNum)
@@ -376,9 +384,12 @@ func (s *server) serverWorkerRoutine() {
 					break
 				}
 			}
-			// if not found send a nil message
 			if !found {
-				s.responseOrderedMessageChan <- nil
+				if s.numLostMessagesToReturn > 0 {
+					s.responseOrderedMessageChan <- nil
+				} else {
+					s.numMessagesToReturn++
+				}
 			}
 		case msg := <-s.writeChan:
 			if msg != nil {
@@ -430,6 +441,12 @@ func (s *server) handleEpochEvent() {
 					s.clientLostDuringClose = true
 				}
 				s.numActiveConns--
+				if s.numMessagesToReturn > 0 {
+					s.responseOrderedMessageChan <- nil
+					s.numMessagesToReturn--
+				} else {
+					s.numLostMessagesToReturn++
+				}
 			}
 			stub.dataSentLastEpoch = false
 
@@ -462,22 +479,16 @@ func (s *server) mightTerminateClientConnection(id int) {
 // Read will hang if server has already been explicitly closed
 func (s *server) Read() (int, []byte, error) {
 	var msg *Message
-	for {
-		s.requestOrderedMessageChan <- true
-		msg = <-s.responseOrderedMessageChan
-		if msg != nil {
-			break
-		}
+	s.requestOrderedMessageChan <- true
+	msg = <-s.responseOrderedMessageChan
 
-		// Return a non-nil error if a connection with any client has been lost and no other messages are waiting to be returned from said client
-		s.requestGenericConnLostNoMessagesChan <- true
-		id := <-s.responseGenericConnLostNoMessagesChan
-		if id != 0 {
-			return id, nil, errors.New("connection has been lost")
-		}
-
-		time.Sleep(1 * time.Millisecond)
+	// Return a non-nil error if a connection with any client has been lost and no other messages are waiting to be returned from said client
+	s.requestGenericConnLostNoMessagesChan <- true
+	id := <-s.responseGenericConnLostNoMessagesChan
+	if id != 0 {
+		return id, nil, errors.New("connection has been lost")
 	}
+
 	// Return a non-nil error if the connection with the client has been explicitly closed
 	s.requestConnClosedChan <- msg.ConnID
 	beenClosed := <-s.responseConnClosedChan
